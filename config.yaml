@@ -1,0 +1,43 @@
+# ==============================================================================
+# Final Project TLF - Garbage Classification (PCA + FCM + KNN)
+# Konfigurasi Parameter Default Pipeline & Model
+# Dataset: Kaggle Garbage Images Dataset (zlatan599/garbage-dataset-classification)
+# ==============================================================================
+
+# Konfigurasi Dataset
+dataset:
+  dataset_slug: "zlatan599/garbage-dataset-classification"
+  data_dir: "data/Garbage_Dataset_Classification/images"
+  samples_per_class: 100
+  test_size: 0.2
+  random_state: 42
+
+# Konfigurasi Ekstraksi Fitur
+features:
+  feature_extractor: "mobilenetv2"  # Opsi: "mobilenetv2" (1280 dimensi) | "handcrafted" (~26 dimensi)
+  image_size: [224, 224]           # Dimensi input citra [width, height]
+  use_edge_density: false          # Canny edge density (hanya untuk mode handcrafted)
+
+# Parameter Principal Component Analysis (PCA)
+pca:
+  variance_threshold: 0.90         # Target kumulatif explained variance ratio (90%)
+  max_components: 50               # Batas maksimum jumlah komponen PCA
+
+# Parameter Fuzzy C-Means (FCM)
+fcm:
+  c: 6                             # Jumlah cluster (disesuaikan dengan kelas dataset)
+  m: 2.0                           # Fuzziness exponent (parameter pembobot fuzzy, m > 1)
+  max_iter: 150                    # Batas maksimum iterasi konvergensi
+  epsilon: 0.00001                 # Toleransi ambang konvergensi
+  random_state: 42                 # Seed acak untuk reproduktibilitas inisialisasi U
+
+# Parameter K-Nearest Neighbors (KNN)
+knn:
+  n_neighbors: 5                   # Jumlah tetangga terdekat k
+  metric: "euclidean"              # Metrik jarak
+  mu_weight: 1.0                   # Bobot pengali vektor keanggotaan fuzzy mu saat digabung dengan fitur PCA
+
+# Path Direktori
+paths:
+  data_dir: "data"
+  models_dir: "models"

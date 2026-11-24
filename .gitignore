@@ -1,0 +1,53 @@
+# ==============================================================================
+# Git Ignore - Final Project TLF (Fuzzy Sampah)
+# ==============================================================================
+
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Lingkungan Virtual Python
+.venv/
+venv/
+ENV/
+env/
+env.bak/
+venv.bak/
+
+# Jupyter Notebook & Checkpoints
+.ipynb_checkpoints/
+*/.ipynb_checkpoints/*
+
+# IDE & Editor Configs
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Sistem Operasi
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Dataset Citra: Abaikan folder raw dataset, arsip zip/tar, tetapi lacak skrip & README
+data/*
+!data/download_dataset.py
+!data/README.md
+!data/.gitkeep
+
+# Artefak Model Biner: Abaikan file model biner yang dihasilkan training
+# Gunakan placeholder README.md dan .gitkeep agar direktori tetap terlacak oleh Git
+models/*.pkl
+models/*.npy
+!models/README.md
+!models/.gitkeep
+!models/meta.json
+
+# Direktori Temporary / Scratch / Logs
+scratch/
+temp/
+*.log
+
+graphify-out/
