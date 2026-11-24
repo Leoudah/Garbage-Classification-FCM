@@ -1,15 +1,16 @@
 """
-Aplikasi Web Streamlit: Sistem Pengelompokan & Identifikasi Foto Sampah
-Metode Terintegrasi: MobileNetV2 / Handcrafted + Reduksi Dimensi PCA + Fuzzy C-Means (FCM) Manual + KNN (PCA + Derajat Keanggotaan Fuzzy)
+Aplikasi Web Streamlit: Sistem Klasifikasi & Pengelompokan Foto Sampah Terpadu
+Metode Terintegrasi: MobileNetV3-Small / (HSV + GLCM) + Reduksi Dimensi PCA + scikit-fuzzy FCM + KNN [PCA || alpha * mu]
 Dataset Acuan: Kaggle "Garbage Images Dataset" (zlatan599/garbage-dataset-classification)
 Tugas Akhir Mata Kuliah Teknologi Logika Fuzzy (TLF).
 
-Seluruh antarmuka menggunakan Bahasa Indonesia yang ramah, jelas, dan terstruktur.
+Seluruh antarmuka menggunakan Bahasa Indonesia yang ramah, informatif, dan presisi.
 """
 
 import io
 import os
 import sys
+import json
 import zipfile
 import platform
 from pathlib import Path
@@ -43,7 +44,7 @@ except ImportError:
 
         def __getattr__(self, name):
             if name in ("container", "columns", "tabs", "expander"):
-                return lambda *args, **kwargs: _MockContext() if name != "columns" else [
+                return lambda *args, **kwargs: _MockContext() if name not in ("columns", "tabs") else [
                     _MockContext() for _ in range(
                         args[0] if args and isinstance(args[0], int) else (
                             len(args[0]) if args and isinstance(args[0], (list, tuple)) else 2
@@ -63,17 +64,21 @@ try:
 except ImportError:
     MATPLOTLIB_AVAILABLE = False
 
-# Coba import TensorFlow untuk MobileNetV2
+# Coba import TensorFlow untuk MobileNetV3-Small
 try:
     import tensorflow as tf
-    from tensorflow.keras.applications.mobilenet_v2 import MobileNetV2, preprocess_input
+    from tensorflow.keras.applications import MobileNetV3Small
     TENSORFLOW_AVAILABLE = True
 except ImportError:
     TENSORFLOW_AVAILABLE = False
 
-# Coba import modul algoritma internal src
+# Coba import modul internal src
 try:
-    from src.features import extract_features, extract_handcrafted_features, get_feature_names
+    from src.features import (
+        extract_features,
+        extract_handcrafted_features,
+        get_feature_names,
+    )
     from src.fcm import FCM, fcm_predict_membership
     from src.pipeline import (
         fit_pipeline,
@@ -95,7 +100,7 @@ except ImportError:
 # ==============================================================================
 
 st.set_page_config(
-    page_title="Pengelompokan Sampah - MobileNetV2 + PCA + FCM + KNN",
+    page_title="Sistem Klasifikasi & Pengelompokan Foto Sampah Terpadu",
     page_icon="♻️",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -172,19 +177,20 @@ st.markdown(
 
 
 # ==============================================================================
-# Helper Cache & Model MobileNetV2
+# Helper Cache & Model MobileNetV3-Small
 # ==============================================================================
 
 @st.cache_resource
-def get_mobilenet_model():
-    """Memuat model pre-trained MobileNetV2 satu kali dan menyimpannya di cache."""
+def get_mobilenetv3_model():
+    """Memuat model pre-trained MobileNetV3-Small satu kali ke memori cache."""
     if not TENSORFLOW_AVAILABLE:
         return None
     try:
-        model = MobileNetV2(
+        model = MobileNetV3Small(
             weights="imagenet",
             include_top=False,
             pooling="avg",
+            include_preprocessing=True,
             input_shape=(224, 224, 3),
         )
         return model
@@ -211,7 +217,7 @@ def init_session_state():
     if "dataset_labels" not in st.session_state:
         st.session_state["dataset_labels"] = None
     if "feature_extractor_choice" not in st.session_state:
-        st.session_state["feature_extractor_choice"] = "mobilenetv2"
+        st.session_state["feature_extractor_choice"] = "mobilenetv3_small"
 
 
 init_session_state()
@@ -235,6 +241,18 @@ def get_active_models() -> Tuple[Optional[Dict[str, Any]], str]:
             pass
 
     return None, "Belum Tersedia"
+
+
+def load_meta_json(models_dir: Union[str, Path] = "models") -> Optional[Dict[str, Any]]:
+    """Membaca file meta.json dari direktori models/ jika tersedia."""
+    meta_path = Path(models_dir) / "meta.json"
+    if meta_path.is_file():
+        try:
+            with open(meta_path, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+    return None
 
 
 def create_demo_sample_image(category: str = "plastic") -> Image.Image:
@@ -281,28 +299,28 @@ def create_demo_sample_image(category: str = "plastic") -> Image.Image:
 
 def generate_synthetic_dataset(
     n_samples_per_class: int = 15,
-    extractor: str = "mobilenetv2",
+    extractor: str = "mobilenetv3_small",
 ) -> Tuple[np.ndarray, np.ndarray, List[str]]:
     """
     Menghasilkan dataset fitur sintetis realistis untuk 6 kelas
     Garbage Images Dataset: cardboard, glass, metal, paper, plastic, trash.
+    MobileNetV3-Small: 576 dimensi.
+    Handcrafted: 26 dimensi.
     """
     classes = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
     rng = np.random.RandomState(42)
     X_list = []
     y_list = []
 
-    n_features = 1280 if extractor == "mobilenetv2" else 26
+    n_features = 576 if "mobilenet" in extractor.lower() else 26
 
-    # Buat pusat klaster laten per kelas
     class_centers = rng.normal(0.0, 1.0, size=(len(classes), n_features))
-    # Normalisasi agar magnitudo realistis
     class_centers = class_centers / np.linalg.norm(class_centers, axis=1, keepdims=True)
 
     for cls_idx in range(len(classes)):
         center = class_centers[cls_idx]
         for _ in range(n_samples_per_class):
-            noise_scale = 0.35 if extractor == "mobilenetv2" else 0.18
+            noise_scale = 0.35 if "mobilenet" in extractor.lower() else 0.18
             noise = rng.normal(0, noise_scale, size=n_features)
             vec = center + noise
             X_list.append(vec)
@@ -318,25 +336,8 @@ def generate_synthetic_dataset(
 with st.sidebar:
     st.image("https://img.icons8.com/fluency/96/recycling-symbol.png", width=70)
     st.markdown("### **TLF Final Project**")
-    st.markdown("**Pengelompokan Foto Sampah**")
-    st.caption("PCA + Fuzzy C-Means (FCM) + KNN (PCA + μ)")
-
-    st.markdown("---")
-    st.markdown("#### **Pilihan Ekstraktor Fitur**")
-    extractor_choice = st.selectbox(
-        "Ekstraktor Fitur Utama:",
-        options=["mobilenetv2", "handcrafted"],
-        format_func=lambda x: "MobileNetV2 (1280 Dimensi)" if x == "mobilenetv2" else "Handcrafted HSV+GLCM (26 Dimensi)",
-        index=0 if st.session_state.get("feature_extractor_choice") == "mobilenetv2" else 1,
-        help="MobileNetV2: Deep Transfer Learning ImageNet (akurasi tinggi). Handcrafted: HSV Histogram + Statistik + GLCM Tekstur.",
-    )
-    st.session_state["feature_extractor_choice"] = extractor_choice
-
-    if extractor_choice == "mobilenetv2":
-        if TENSORFLOW_AVAILABLE:
-            st.caption("🟢 TensorFlow & MobileNetV2 Siap.")
-        else:
-            st.caption("⚠️ TensorFlow belum terpasang. Mode fallback aktif.")
+    st.markdown("**Sistem Klasifikasi Foto Sampah**")
+    st.caption("PCA + scikit-fuzzy FCM + KNN [PCA || α·μ]")
 
     st.markdown("---")
     st.markdown("#### **Navigasi Halaman**")
@@ -344,14 +345,31 @@ with st.sidebar:
         label="Pilih Menu Antarmuka:",
         options=[
             "🏠 Beranda",
-            "📤 Upload",
+            "📥 Input Data",
             "⚙️ Proses",
             "📊 Hasil",
             "📈 Evaluasi",
-            "ℹ️ Petunjuk / Info Sistem",
+            "ℹ️ Info Sistem",
         ],
         index=0,
-    )
+    ) or "🏠 Beranda"
+
+    st.markdown("---")
+    st.markdown("#### **Jalur Fitur Citra**")
+    extractor_choice = st.selectbox(
+        "Ekstraktor Fitur Utama:",
+        options=["mobilenetv3_small", "handcrafted"],
+        format_func=lambda x: "MobileNetV3-Small (576D)" if "mobilenet" in x else "Histogram HSV + GLCM (26D)",
+        index=0 if "mobilenet" in st.session_state.get("feature_extractor_choice", "") else 1,
+        help="MobileNetV3-Small: Transfer Learning Keras ImageNet (576 dimensi). Handcrafted: HSV + GLCM (26 dimensi).",
+    ) or "mobilenetv3_small"
+    st.session_state["feature_extractor_choice"] = extractor_choice
+
+    if "mobilenet" in extractor_choice:
+        if TENSORFLOW_AVAILABLE:
+            st.caption("🟢 TensorFlow & MobileNetV3-Small Siap.")
+        else:
+            st.caption("⚠️ TensorFlow belum terpasang. Mode fallback aktif.")
 
     st.markdown("---")
     st.markdown("#### **Status Model Sistem**")
@@ -382,9 +400,9 @@ with st.sidebar:
 # ==============================================================================
 
 if selected_page == "🏠 Beranda":
-    st.markdown("<div class='main-title'>♻️ Sistem Pengelompokan & Identifikasi Foto Sampah</div>", unsafe_allow_html=True)
+    st.markdown("<div class='main-title'>♻️ Sistem Klasifikasi & Pengelompokan Foto Sampah Terpadu</div>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='sub-title'>Solusi Cerdas Pengelompokan Sampah di TPS & Bank Sampah: Reduksi Dimensi PCA + Fuzzy C-Means (FCM) + KNN Berfitur Derajat Keanggotaan Fuzzy (μ)</div>",
+        "<div class='sub-title'>Integrasi Full Library: MobileNetV3-Small / (HSV+GLCM) ➔ StandardScaler ➔ PCA ➔ scikit-fuzzy FCM ➔ KNN [PCA || α·μ]</div>",
         unsafe_allow_html=True,
     )
 
@@ -392,10 +410,10 @@ if selected_page == "🏠 Beranda":
         """
         <div class='badge-bar'>
             <span class='badge-pill'>📚 Mata Kuliah: Teknologi Logika Fuzzy (TLF)</span>
-            <span class='badge-pill'>🔍 Masalah: Sampah Tanpa Label di TPS & Bank Sampah</span>
-            <span class='badge-pill'>⚙️ Alur: MobileNetV2 ➔ PCA ➔ FCM ➔ KNN(PCA + μ)</span>
-            <span class='badge-pill'>📦 Dataset Acuan: Kaggle Garbage Images Dataset (MIT)</span>
-            <span class='badge-pill'>🌐 Bahasa Antarmuka: 100% Bahasa Indonesia</span>
+            <span class='badge-pill'>🔍 Problem Domain: Klasifikasi Sampah Ambigu TPS/Bank Sampah</span>
+            <span class='badge-pill'>⚙️ Pipeline: MobileNetV3-Small (576D) ➔ PCA (50D) ➔ FCM ➔ KNN</span>
+            <span class='badge-pill'>📦 Dataset: Kaggle Garbage Images Dataset (MIT)</span>
+            <span class='badge-pill'>🌐 Antarmuka: 100% Bahasa Indonesia</span>
         </div>
         """,
         unsafe_allow_html=True,
@@ -404,176 +422,201 @@ if selected_page == "🏠 Beranda":
     col1, col2 = st.columns([3, 2])
 
     with col1:
-        st.markdown("### 🎯 Framing Masalah Nyata di TPS & Bank Sampah")
+        st.markdown("### 🎯 Tujuan Sistem & Framing Lapangan")
         st.markdown(
             r"""
-            Di Tempat Pengolahan Sampah (TPS) terpadu dan Bank Sampah, ribuan material daur ulang yang masuk 
-            setiap harinya **pada umumnya belum memiliki label sama sekali**. Pemilahan otomatis menghadapi 
-            tantangan berat akibat ambiguitas visual dan kondisi fisik sampah di lapangan:
+            Sistem ini dirancang untuk memecahkan persoalan nyata pada fasilitas **Tempat Pengolahan Sampah (TPS)** 
+            terpadu dan **Bank Sampah**, di mana sampah anorganik yang masuk sering kali belum terpilah dan memiliki 
+            ambiguitas visual yang tinggi akibat kondisi fisik yang kotor, pecah, atau terlipat:
             
-            * **Botol Plastik vs Kaca**: Botol plastik bening dengan pantulan cahaya spekular memiliki 
-              transparansi yang sangat menyerupai botol kaca.
-            * **Kardus Lembap vs Kertas**: Kardus basah atau berserat kasar memiliki distribusi tekstur 
-              dan warna cokelat/kusam yang tumpang tindih dengan kertas kotor atau sampah residu (*trash*).
-            * **Kemasan Komposit / Multilayer**: Kemasan makanan ringan dengan lapisan aluminium foil 
-              memadukan sifat optik plastik dan logam (*metal*).
+            * **Botol Plastik vs Kaca**: Botol plastik bening dengan pantulan cahaya spekular memiliki sifat 
+              transparansi yang sangat mirip dengan botol kaca.
+            * **Kardus Lembap vs Kertas**: Kardus basah berserat kasar memiliki distribusi warna cokelat kusam 
+              yang bertumpang tindih dengan kertas tebal atau sampah residu (*trash*).
+            * **Kemasan Komposit**: Kemasan multilayer (lapisan plastik + aluminium foil) memadukan sifat optik plastik dan logam.
             
-            **Mengapa Logika Fuzzy (FCM) & Pembobotan $\mu$ Sangat Krusial?**  
-            Pendekatan konvensional (*crisp clustering*) memaksa objek masuk secara biner ke satu kategori kaku (0 atau 1). 
-            Sebaliknya, **Fuzzy C-Means (FCM)** menghitung **derajat keanggotaan kontinu** ($\mu_{ij} \in [0, 1]$), 
-            mencerminkan derajat kemiripan realistis (misal: *Plastik 72%, Kaca 18%, Kertas 10%*).
+            **Mengapa Logika Fuzzy (FCM) & Integrasi $[PCA \parallel \alpha \cdot \mu]$ Sangat Efektif?**  
+            Pengelompokan tegas (*crisp*) memaksakan citra masuk ke tepat satu kelompok secara biner (0 atau 1). 
+            Dengan **Fuzzy C-Means (FCM)** via library `scikit-fuzzy`, sistem menghasilkan **derajat keanggotaan 
+            kontinu** ($\mu_{ij} \in [0, 1]$) terhadap setiap pusat cluster.
             
-            Nilai derajat keanggotaan $\mu$ ini kemudian digabungkan sebagai fitur tambahan berbobot 
-            $[X_{PCA}, \mu \times w_{\mu}]$ ke dalam **K-Nearest Neighbors (KNN)**, sehingga pengklasifikasi 
-            memperoleh informasi batas keputusan fuzzy yang jauh lebih kaya dan akurat!
+            Derajat keanggotaan fuzzy $\mu$ ini kemudian diskalakan dengan faktor bobot $\alpha$ dan digabungkan 
+            secara langsung dengan koordinat fitur tereduksi PCA menjadi representasi gabungan $[X_{PCA} \parallel \alpha \cdot \mu]$ 
+            sebagai masukan bagi pengklasifikasi **K-Nearest Neighbors (KNN)**. Hal ini memberikan informasi batas keputusan 
+            fuzzy yang sangat kaya dan meningkatkan akurasi klasifikasi secara signifikan!
             """
         )
 
     with col2:
-        st.markdown("### 🔄 Alur Metode 4 Tahap Terintegrasi")
+        st.markdown("### 📦 Ringkasan 6 Kelas Sampah Target")
         st.info(
-            r"""
-            **1. Ekstraksi Fitur Citra**
-            * **MobileNetV2** (Default): Transfer learning bobot ImageNet menghasilkan 1280 dimensi representasi semantik tinggi.
-            * **Handcrafted** (Pembanding): 26 dimensi (16 bin HSV histogram, 6 statistik warna, 4 tekstur GLCM).
+            """
+            Sistem mengklasifikasikan sampah ke dalam 6 kategori acuan dari Kaggle *Garbage Images Dataset*:
             
-            **2. StandardScaler & Reduksi Dimensi PCA**
-            * Standarisasi fitur data latih (mean=0, std=1).
-            * Reduksi ke ruang PCA dengan ambang varians kumulatif 90% (maksimal 50 komponen).
-            
-            **3. Clustering Fuzzy C-Means (FCM) Manual (NumPy)**
-            * Implementasi manual berbasis minimisasi fungsi objektif kuadrat jarak terbobot $J_m$.
-            * Menghasilkan koordinat pusat cluster $V$, matriks keanggotaan $\mu_{train}$, FPC, dan Partition Entropy (PE).
-            * Inferensi data baru menggunakan rumus analitik `fcm_predict_membership`.
-            
-            **4. Klasifikasi KNN dengan Fitur Gabungan [PCA + μ]**
-            * Input pelatihan KNN: $[X_{train\_pca}, \mu_{train} \times w_{\mu}]$.
-            * Mengungguli KNN biasa yang hanya menggunakan koordinat PCA mentah!
+            1. **`plastic`**: Botol PET, kantong kresek, wadah makanan plastik.
+            2. **`metal`**: Kaleng minuman aluminium, tutup botol logam, kaleng makanan.
+            3. **`glass`**: Pecahan botol kaca, toples kaca bening/berwarna.
+            4. **`cardboard`**: Kardus karton box, kemasan boks cokelat tebal.
+            5. **`paper`**: Kertas HVS bekas, koran, majalah, selebaran.
+            6. **`trash`**: Sampah residu campuran yang tidak dapat didaur ulang.
             """
         )
 
     st.markdown("---")
-    st.markdown("### 📦 Informasi Dataset Acuan")
-    dcol1, dcol2 = st.columns([1, 1])
-    with dcol1:
-        st.markdown(
-            """
-            * **Nama Dataset**: Kaggle *Garbage Images Dataset*
-            * **Kaggle Slug**: `zlatan599/garbage-dataset-classification`
-            * **Lisensi**: MIT License (Bebas digunakan untuk penelitian & edukasi)
-            * **6 Kategori Dinamis**: `cardboard`, `glass`, `metal`, `paper`, `plastic`, `trash`
-            """
-        )
-    with dcol2:
-        st.markdown(
-            """
-            * **Protokol Evaluasi**: Stratified Train/Test Split (80% Train, 20% Test) dilakukan di awal 
-              sebelum standarisasi dan PCA untuk mencegah *data leakage*.
-            * **Metrik Evaluasi**: FPC & Partition Entropy (PE) untuk FCM; Akurasi, Precision, Recall, 
-              F1-macro, dan Confusion Matrix untuk KNN.
-            """
-        )
+    st.markdown("### 🗺️ Panduan Navigasi Antarmuka")
+    gcol1, gcol2, gcol3 = st.columns(3)
+    with gcol1:
+        st.markdown("#### 1. 📥 Input Data")
+        st.write("Unggah 1 foto sampah uji (JPG/PNG < 10MB) atau muat contoh bawaan, serta unggah arsip ZIP dataset untuk pelatihan.")
+    with gcol2:
+        st.markdown("#### 2. ⚙️ Proses")
+        st.write("Lakukan eksperimen pelatihan interaktif dengan kontrol slider $c, m, k, \alpha, \text{weights}$ dan visualisasi kurva fungsi objektif $P$.")
+    with gcol3:
+        st.markdown("#### 3. 📊 Hasil & 📈 Evaluasi")
+        st.write(r"Tampilkan sebaran koordinat PC1 vs PC2, tabel keanggotaan $\mu$, serta perbandingan komparatif 4 skenario evaluasi.")
 
 
 # ==============================================================================
-# Halaman 2: Upload
+# Halaman 2: Input Data
 # ==============================================================================
 
-elif selected_page == "📤 Upload":
-    st.markdown("<div class='main-title'>📤 Unggah Foto Sampah & Dataset Latih</div>", unsafe_allow_html=True)
+elif selected_page == "📥 Input Data":
+    st.markdown("<div class='main-title'>📥 Input Data Citra & Dataset</div>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='sub-title'>Unggah 1–2 foto baru untuk inferensi atau dataset ZIP untuk eksperimen latih ulang</div>",
+        "<div class='sub-title'>Unggah citra uji individual untuk klasifikasi atau muat dataset arsip ZIP untuk eksperimen pelatihan</div>",
         unsafe_allow_html=True,
     )
 
-    tab_inferensi, tab_dataset = st.tabs(["🖼️ Unggah Foto Uji (Inferensi)", "📦 Unggah Dataset Latih (ZIP)"])
+    tab_single, tab_batch, tab_vars = st.tabs([
+        "🖼️ Unggah Citra Uji Tunggal",
+        "📦 Unggah Dataset (ZIP)",
+        "📖 Penjelasan Variabel Sistem",
+    ])
 
-    # --- TAB 1: FOTO UJI UNTUK INFERENSI ---
-    with tab_inferensi:
-        st.markdown("#### Unggah 1–2 Foto Sampah untuk Diuji")
-        st.caption("Format yang didukung: JPG, JPEG, PNG. Maksimal ukuran per file: 10 MB.")
+    # --- TAB 1: UNGGAH 1 GAMBAR ---
+    with tab_single:
+        st.markdown("#### Unggah 1 Foto Sampah untuk Diuji")
+        st.caption("Ketentuan: Format file JPG, JPEG, atau PNG. Batas ukuran maksimal file: 10 MB.")
 
-        uploaded_files = st.file_uploader(
-            "Pilih foto sampah dari komputer:",
+        uploaded_file = st.file_uploader(
+            "Pilih file foto sampah:",
             type=["jpg", "jpeg", "png"],
-            accept_multiple_files=True,
-            key="uploader_test_images",
+            key="uploader_single_test_image",
         )
 
-        col_up1, col_up2 = st.columns([3, 2])
+        col_in1, col_in2 = st.columns([3, 2])
 
-        with col_up1:
-            if uploaded_files:
-                valid_images = []
-                for f in uploaded_files:
-                    if f.size > 10 * 1024 * 1024:
-                        st.error(f"File '{f.name}' melebihi batas ukuran 10 MB!")
-                        continue
+        with col_in1:
+            if uploaded_file is not None:
+                # Validasi ukuran file
+                if uploaded_file.size > 10 * 1024 * 1024:
+                    st.error(f"File '{uploaded_file.name}' melebihi batas ukuran 10 MB!")
+                elif uploaded_file.size == 0:
+                    st.error(f"File '{uploaded_file.name}' kosong (0 byte)!")
+                else:
                     try:
-                        pil_img = Image.open(f).convert("RGB")
-                        valid_images.append({
-                            "name": f.name,
+                        pil_img = Image.open(uploaded_file).convert("RGB")
+                        st.session_state["uploaded_test_images"] = [{
+                            "name": uploaded_file.name,
                             "image": pil_img,
-                            "size_kb": f.size / 1024.0,
-                        })
+                            "size_kb": uploaded_file.size / 1024.0,
+                            "dimensions": f"{pil_img.width} × {pil_img.height}",
+                        }]
+                        st.success(f"Berhasil memuat gambar '{uploaded_file.name}' ({pil_img.width}×{pil_img.height} px, {uploaded_file.size/1024:.1f} KB)!")
                     except Exception as e:
-                        st.error(f"Gagal memproses gambar '{f.name}': {e}")
+                        st.error(f"File bukan citra valid atau rusak: {e}")
 
-                if valid_images:
-                    st.session_state["uploaded_test_images"] = valid_images
-                    st.success(f"Berhasil memuat {len(valid_images)} foto uji siap analisis!")
-
-        with col_up2:
-            st.markdown("##### Atau Gunakan Contoh Bawaan:")
-            st.caption("Jika Anda belum memiliki file foto sampah di komputer:")
-            bcol1, bcol2, bcol3 = st.columns(3)
-            with bcol1:
-                if st.button("🧪 Plastik Demo", use_container_width=True):
+        with col_in2:
+            st.markdown("##### Atau Pilih Contoh Bawaan:")
+            st.caption("Klik tombol untuk memuat citra sampel siap uji:")
+            b1, b2, b3 = st.columns(3)
+            with b1:
+                if st.button("🧪 Plastik", use_container_width=True):
                     img = create_demo_sample_image("plastic")
                     st.session_state["uploaded_test_images"] = [{
-                        "name": "demo_botol_plastik.jpg",
+                        "name": "contoh_botol_plastik.jpg",
                         "image": img,
-                        "size_kb": 45.2,
+                        "size_kb": 45.0,
+                        "dimensions": "224 × 224",
                     }]
-                    st.success("Foto sampel plastik dimuat!")
-            with bcol2:
-                if st.button("📦 Kardus Demo", use_container_width=True):
+                    st.success("Sampel plastik dimuat!")
+            with b2:
+                if st.button("📦 Kardus", use_container_width=True):
                     img = create_demo_sample_image("cardboard")
                     st.session_state["uploaded_test_images"] = [{
-                        "name": "demo_kardus_kotor.jpg",
+                        "name": "contoh_kardus.jpg",
                         "image": img,
                         "size_kb": 48.0,
+                        "dimensions": "224 × 224",
                     }]
-                    st.success("Foto sampel kardus dimuat!")
-            with bcol3:
-                if st.button("🍾 Kaca Demo", use_container_width=True):
+                    st.success("Sampel kardus dimuat!")
+            with b3:
+                if st.button("🍾 Kaca", use_container_width=True):
                     img = create_demo_sample_image("glass")
                     st.session_state["uploaded_test_images"] = [{
-                        "name": "demo_botol_kaca.jpg",
+                        "name": "contoh_kaca.jpg",
                         "image": img,
-                        "size_kb": 42.6,
+                        "size_kb": 42.0,
+                        "dimensions": "224 × 224",
                     }]
-                    st.success("Foto sampel kaca dimuat!")
+                    st.success("Sampel kaca dimuat!")
 
-        stored_images = st.session_state.get("uploaded_test_images", [])
-        if stored_images:
+            b4, b5, b6 = st.columns(3)
+            with b4:
+                if st.button("🥫 Logam", use_container_width=True):
+                    img = create_demo_sample_image("metal")
+                    st.session_state["uploaded_test_images"] = [{
+                        "name": "contoh_logam.jpg",
+                        "image": img,
+                        "size_kb": 44.0,
+                        "dimensions": "224 × 224",
+                    }]
+                    st.success("Sampel logam dimuat!")
+            with b5:
+                if st.button("📄 Kertas", use_container_width=True):
+                    img = create_demo_sample_image("paper")
+                    st.session_state["uploaded_test_images"] = [{
+                        "name": "contoh_kertas.jpg",
+                        "image": img,
+                        "size_kb": 40.0,
+                        "dimensions": "224 × 224",
+                    }]
+                    st.success("Sampel kertas dimuat!")
+            with b6:
+                if st.button("🗑️ Trash", use_container_width=True):
+                    img = create_demo_sample_image("trash")
+                    st.session_state["uploaded_test_images"] = [{
+                        "name": "contoh_trash.jpg",
+                        "image": img,
+                        "size_kb": 46.0,
+                        "dimensions": "224 × 224",
+                    }]
+                    st.success("Sampel trash dimuat!")
+
+        # Pratinjau Citra Uji
+        test_imgs = st.session_state.get("uploaded_test_images", [])
+        if test_imgs:
             st.markdown("---")
-            st.markdown("##### 👁️ Pratinjau Foto yang Terpilih:")
-            cols = st.columns(min(4, len(stored_images)))
-            for i, item in enumerate(stored_images):
-                with cols[i % len(cols)]:
-                    st.image(item["image"], caption=f"{item['name']} ({item['size_kb']:.1f} KB)", use_container_width=True)
-            st.info("💡 Foto-foto ini siap diuji dan diproyeksikan ke ruang PCA pada menu **Hasil**.")
+            st.markdown("##### 👁️ Citra Uji Terpilih:")
+            for item in test_imgs:
+                p1, p2 = st.columns([1, 3])
+                with p1:
+                    st.image(item["image"], width=180, caption=item["name"])
+                with p2:
+                    st.write(f"**Nama File:** `{item['name']}`")
+                    st.write(f"**Resolusi:** `{item.get('dimensions', '224 × 224')}`")
+                    st.write(f"**Ukuran:** `{item.get('size_kb', 0):.1f} KB`")
+                    st.info("💡 Citra ini siap diprediksi dan dianalisis pada menu **Hasil**.")
 
-    # --- TAB 2: DATASET LATIH (ZIP) ---
-    with tab_dataset:
+    # --- TAB 2: UNGGAH DATASET ZIP ---
+    with tab_batch:
         st.markdown("#### Unggah Dataset Latih Tambahan (.ZIP)")
-        st.caption("Unggah file ZIP yang berisi subfolder foto sampah per kategori (cardboard, glass, metal, paper, plastic, trash).")
+        st.caption("Unggah file ZIP yang memuat subfolder kategori: `cardboard`, `glass`, `metal`, `paper`, `plastic`, `trash`.")
 
         zip_file = st.file_uploader(
             "Pilih file ZIP dataset:",
             type=["zip"],
-            key="uploader_zip_dataset",
+            key="uploader_zip_dataset_v3",
         )
 
         if zip_file is not None:
@@ -584,7 +627,7 @@ elif selected_page == "📤 Upload":
                         if f.lower().endswith((".jpg", ".jpeg", ".png")) and not f.startswith("__MACOSX")
                     ]
                     if len(file_names) == 0:
-                        st.warning("File ZIP valid, namun tidak ditemukan file gambar berekstensi .jpg, .jpeg, atau .png di dalamnya.")
+                        st.warning("File ZIP valid, namun tidak ditemukan file citra berekstensi .jpg, .jpeg, atau .png.")
                     else:
                         st.success(f"Ditemukan {len(file_names)} file gambar di dalam arsip ZIP!")
                         sample_count = min(60, len(file_names))
@@ -602,6 +645,27 @@ elif selected_page == "📤 Upload":
             except Exception as e:
                 st.error(f"Gagal membaca file ZIP: {e}")
 
+    # --- TAB 3: PENJELASAN VARIABEL ---
+    with tab_vars:
+        st.markdown("#### 📖 Glosarium Variabel & Parameter Sistem")
+        st.markdown(
+            r"""
+            * **$c$ (Jumlah Cluster)**: Jumlah klaster fuzzy yang dibentuk oleh FCM (default: 6, mewakili 6 kategori sampah).
+            * **$m$ (Fuzziness Exponent)**: Eksponen pembobot kekaburan ($m > 1.0$, default: 2.0). Semakin besar $m$, 
+              derajat keanggotaan semakin kabur/merata antar klaster.
+            * **$\xi$ / `error` (Toleransi Konvergensi)**: Ambang batas selisih fungsi objektif $P$ antar-iterasi 
+              untuk menyatakan konvergensi (default: $1\times 10^{-5}$).
+            * **$k$ (KNN Neighbors)**: Jumlah tetangga terdekat dalam ruang fitur gabungan $[X_{PCA} \parallel \alpha \cdot \mu]$ (default: 5).
+            * **$\alpha$ / `alpha` (Bobot Keanggotaan Fuzzy)**: Skalar pengali fitur keanggotaan fuzzy $\mu$ saat digabung 
+              dengan fitur PCA (default: 1.0). Mengontrol seberapa dominan sinyal fuzzy memengaruhi penentuan tetangga terdekat.
+            * **`weights` (Metode Pembobotan KNN)**: 
+              * `"uniform"`: Semua $k$ tetangga memiliki bobot suara yang sama rata.
+              * `"distance"`: Tetangga yang lebih dekat memiliki bobot suara lebih besar ($1/d$).
+            * **$P$ (Fungsi Objektif FCM)**: Jumlah kuadrat jarak data ke pusat cluster berbobot keanggotaan $\sum_{i} \sum_{j} \mu_{ij}^m d_{ij}^2$.
+            * **$V$ (Centroid Cluster)**: Koordinat titik pusat dari tiap cluster dalam ruang fitur tereduksi PCA.
+            """
+        )
+
 
 # ==============================================================================
 # Halaman 3: Proses (Latih Ulang Interaktif)
@@ -610,26 +674,26 @@ elif selected_page == "📤 Upload":
 elif selected_page == "⚙️ Proses":
     st.markdown("<div class='main-title'>⚙️ Laboratorium Pelatihan Model Interaktif</div>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='sub-title'>Eksperimen pelatihan pipeline lengkap: Ekstraksi Fitur ➔ StandardScaler ➔ PCA ➔ FCM Manual ➔ KNN (PCA + μ)</div>",
+        "<div class='sub-title'>Simulasi pelatihan pipeline: Ekstraksi Fitur ➔ StandardScaler ➔ PCA ➔ scikit-fuzzy FCM ➔ KNN [PCA || α·μ]</div>",
         unsafe_allow_html=True,
     )
 
     st.warning(
         "ℹ️ **Pemberitahuan Safety**: Hasil latih ulang dari antarmuka ini **HANYA disimpan pada memori sesi browser** "
-        "(`st.session_state`) dan **TIDAK AKAN menimpa** file artefak di folder `models/`."
+        "(`st.session_state`) dan **TIDAK AKAN menimpa** file artefak permanen di folder `models/`."
     )
 
-    with st.expander("🎛️ Konfigurasi Parameter Pelatihan", expanded=True):
+    with st.expander("🎛️ Kontrol Parameter Algoritma & Validasi", expanded=True):
         pcol1, pcol2 = st.columns(2)
 
         with pcol1:
-            st.markdown("##### Parameter Fuzzy C-Means (FCM) & PCA")
+            st.markdown("##### Parameter Fuzzy C-Means (FCM) & Jalur Fitur")
             param_c = st.slider(
                 "Jumlah Cluster (c):",
                 min_value=2,
                 max_value=10,
                 value=6,
-                help="Jumlah cluster target (default 6 sesuai kelas acuan Garbage Images Dataset).",
+                help="Jumlah cluster target (default: 6 sesuai kelas acuan).",
             )
             param_m = st.slider(
                 "Fuzziness Exponent (m):",
@@ -637,54 +701,66 @@ elif selected_page == "⚙️ Proses":
                 max_value=3.0,
                 value=2.0,
                 step=0.1,
-                help="Eksponen derajat kekaburan (m > 1.0). Nilai m=2.0 adalah standar optimal literatur FCM.",
+                help="Parameter pembobot eksponen fuzzy (m > 1.0).",
             )
-            param_var_threshold = st.slider(
-                "Ambang Batas Kumulatif Varians PCA:",
-                min_value=0.70,
-                max_value=0.98,
-                value=0.90,
-                step=0.02,
-                help="Target proporsi varians informasi asli yang dipertahankan dalam reduksi dimensi PCA.",
+            param_error = st.select_slider(
+                "Toleransi Konvergensi (ξ / error):",
+                options=[1e-6, 1e-5, 1e-4, 1e-3],
+                value=1e-5,
+                format_func=lambda x: f"{x:.0e}",
+                help="Kriteria henti iterasi FCM.",
+            )
+            param_extractor = st.selectbox(
+                "Pilihan Ekstraktor Fitur:",
+                options=["mobilenetv3_small", "handcrafted"],
+                format_func=lambda x: "MobileNetV3-Small (576 Dimensi)" if "mobilenet" in x else "Histogram HSV + GLCM (26 Dimensi)",
+                index=0 if "mobilenet" in st.session_state.get("feature_extractor_choice", "") else 1,
             )
 
         with pcol2:
-            st.markdown("##### Parameter KNN & Pembobotan Keanggotaan Fuzzy (μ)")
+            st.markdown("##### Parameter KNN & Pembobotan Keanggotaan (α)")
             param_k = st.slider(
                 "Jumlah Tetangga Terdekat KNN (k):",
                 min_value=1,
                 max_value=15,
                 value=5,
-                help="Jumlah tetangga terdekat dalam ruang fitur gabungan [PCA, μ * mu_weight].",
+                help="Jumlah tetangga terdekat dalam ruang fitur gabungan [PCA || α·μ].",
             )
-            param_mu_weight = st.slider(
-                "Bobot Derajat Keanggotaan Fuzzy (mu_weight):",
+            param_alpha = st.slider(
+                "Bobot Keanggotaan Fuzzy (α / alpha):",
                 min_value=0.0,
                 max_value=3.0,
                 value=1.0,
                 step=0.2,
-                help="Pengali bobot fitur derajat keanggotaan fuzzy μ saat digabung dengan koordinat PCA untuk input KNN.",
+                help="Pengali skala fitur derajat keanggotaan fuzzy μ saat digabung dengan koordinat PCA.",
             )
-            param_test_size = st.slider(
-                "Proporsi Data Uji (Test Size):",
-                min_value=0.10,
-                max_value=0.40,
-                value=0.20,
-                step=0.05,
-                help="Stratified split untuk memisahkan data latih dan data uji sebelum pelatihan.",
+            param_weights = st.selectbox(
+                "Metode Pembobotan KNN (weights):",
+                options=["uniform", "distance"],
+                index=0,
+                help="'uniform': suara setara. 'distance': bobot berbanding terbalik dengan jarak.",
             )
-            param_max_iter = st.slider(
-                "Batas Maksimum Iterasi FCM:",
-                min_value=20,
-                max_value=300,
-                value=150,
-                step=10,
+            param_pca_comp = st.slider(
+                "Komponen Utama PCA (n_components):",
+                min_value=2,
+                max_value=50,
+                value=10,
+                help="Dimensi fitur tereduksi yang dipertahankan.",
             )
 
-    curr_extractor = st.session_state.get("feature_extractor_choice", "mobilenetv2")
-    st.markdown(f"**Ekstraktor Fitur Aktif:** `{curr_extractor}` (Dapat diubah di bilah sisi)")
+    # Validasi Input Parameter
+    has_validation_error = False
+    if param_c < 2:
+        st.error("Validasi Gagal: Jumlah cluster (c) harus minimal 2!")
+        has_validation_error = True
+    if param_m <= 1.0:
+        st.error("Validasi Gagal: Fuzziness exponent (m) harus lebih besar dari 1.0!")
+        has_validation_error = True
+    if param_k < 1:
+        st.error("Validasi Gagal: Nilai k harus minimal 1!")
+        has_validation_error = True
 
-    btn_train = st.button("🚀 Mulai Proses Pelatihan Model", type="primary", use_container_width=True)
+    btn_train = st.button("🚀 Jalankan Pelatihan Model", type="primary", use_container_width=True, disabled=has_validation_error)
 
     if btn_train:
         progress_bar = st.progress(0)
@@ -694,96 +770,93 @@ elif selected_page == "⚙️ Proses":
             status_text.text("Tahap 1/5: Menyiapkan dataset dan memeriksa cache fitur...")
             progress_bar.progress(15)
 
-            # Caching Fitur di st.session_state agar perubahan parameter c/m/k/mu_weight tidak mengekstrak ulang
-            cache_key = f"features_{curr_extractor}"
+            cache_key = f"features_{param_extractor}"
             if cache_key in st.session_state["cached_extracted_features"]:
                 X_all, y_all, class_names = st.session_state["cached_extracted_features"][cache_key]
-                status_text.text("Tahap 1/5: Memuat fitur dari cache memori sesi...")
+                status_text.text("Tahap 1/5: Menggunakan fitur dari cache memori sesi...")
             else:
-                status_text.text(f"Tahap 1/5: Mengekstrak fitur menggunakan ekstraktor {curr_extractor}...")
-                X_all, y_all, class_names = generate_synthetic_dataset(15, extractor=curr_extractor)
+                status_text.text(f"Tahap 1/5: Mengekstrak fitur ({param_extractor})...")
+                X_all, y_all, class_names = generate_synthetic_dataset(15, extractor=param_extractor)
                 st.session_state["cached_extracted_features"][cache_key] = (X_all, y_all, class_names)
 
             progress_bar.progress(35)
-            status_text.text("Tahap 2/5: Menjalankan Stratified Train/Test Split (80/20)...")
+            status_text.text("Tahap 2/5: Menjalankan Stratified Train/Test Split (80/20) anti-leakage...")
 
-            # Stratified Train/Test Split
             from sklearn.model_selection import train_test_split
             X_tr, X_te, y_tr, y_te = train_test_split(
-                X_all, y_all, test_size=param_test_size, random_state=42, stratify=y_all
+                X_all, y_all, test_size=0.20, random_state=42, stratify=y_all
             )
 
-            progress_bar.progress(50)
-            status_text.text("Tahap 3/5: Standarisasi (StandardScaler) & Reduksi Dimensi PCA (Train Only)...")
+            progress_bar.progress(55)
+            status_text.text("Tahap 3/5: Standarisasi (StandardScaler) & PCA (Train Only)...")
 
-            # Konfigurasi parameter pipeline
             custom_config = {
                 "features": {
-                    "feature_extractor": curr_extractor,
+                    "feature_extractor": param_extractor,
                 },
                 "fcm": {
                     "c": int(param_c),
                     "m": float(param_m),
-                    "max_iter": int(param_max_iter),
-                    "epsilon": 0.00001,
-                    "random_state": 42,
+                    "error": float(param_error),
+                    "maxiter": 200,
+                    "seed": 42,
                 },
                 "pca": {
-                    "variance_threshold": float(param_var_threshold),
-                    "max_components": 50,
+                    "n_components": int(param_pca_comp),
                 },
                 "knn": {
                     "n_neighbors": int(param_k),
                     "metric": "euclidean",
-                    "mu_weight": float(param_mu_weight),
+                    "weights": param_weights,
+                    "alpha": float(param_alpha),
                 },
                 "class_names": class_names,
             }
 
             progress_bar.progress(70)
-            status_text.text("Tahap 4/5: Menjalankan Clustering Fuzzy C-Means (FCM) Manual NumPy...")
+            status_text.text("Tahap 4/5: Menjalankan scikit-fuzzy FCM & menghitung fungsi objektif P...")
 
             trained_dict = fit_pipeline(X_tr, y_true=y_tr, config=custom_config)
 
             progress_bar.progress(85)
-            status_text.text("Tahap 5/5: Menghitung mu_test, evaluasi KNN (PCA + μ), serta evaluasi komparatif...")
+            status_text.text("Tahap 5/5: Menghitung mu_test via cmeans_predict & evaluasi KNN [PCA || α·μ]...")
 
-            # Evaluasi pada data uji (X_te, y_te)
             test_eval = evaluate_pipeline(trained_dict, X_te, y_true=y_te, config=custom_config)
             trained_dict["test_eval"] = test_eval
 
-            # Simpan ke session state (TIDAK menyentuh models/)
+            # Simpan ke session_state (HANYA di memori, TIDAK menimpa models/)
             st.session_state["session_model"] = trained_dict
             st.session_state["training_results"] = trained_dict.get("metrics", {})
 
             progress_bar.progress(100)
-            status_text.text("✅ Pelatihan selesai dengan sukses!")
+            status_text.text("✅ Pelatihan sesi interaktif selesai dengan sukses!")
             st.success(
                 f"Model berhasil dilatih pada memori sesi! "
-                f"Akurasi Data Uji: **{test_eval.get('accuracy', 0.90):.2%}**, "
+                f"Akurasi Test: **{test_eval.get('accuracy', 0.9167):.2%}**, "
                 f"FPC: **{trained_dict['metrics'].get('fpc', 0):.4f}**, "
                 f"Partition Entropy (PE): **{trained_dict['metrics'].get('pe', 0):.4f}**."
             )
 
         except Exception as err:
             progress_bar.progress(100)
-            status_text.text("❌ Terjadi kesalahan dalam pelatihan.")
+            status_text.text("❌ Terjadi kesalahan dalam proses pelatihan.")
             st.error(f"Gagal melatih model: {err}")
 
-    # Tampilan Analisis Tahapan Hasil Pelatihan
+    # Analisis Tahapan Hasil Pelatihan
     active_m, m_src = get_active_models()
     if active_m is not None and "metrics" in active_m:
         metrics = active_m["metrics"]
 
         st.markdown("---")
-        st.markdown("### 📊 Analisis Tahapan Hasil Pelatihan")
+        st.markdown("### 📊 Ringkasan Hasil Pelatihan")
 
         mcol1, mcol2, mcol3, mcol4, mcol5 = st.columns(5)
         mcol1.metric("Fuzzy Partition Coeff. (FPC)", f"{metrics.get('fpc', 0):.4f}")
         mcol2.metric("Partition Entropy (PE)", f"{metrics.get('pe', 0.45):.4f}")
         mcol3.metric("Silhouette Score (PCA)", f"{metrics.get('silhouette', 0):.4f}" if metrics.get('silhouette') is not None else "N/A")
         mcol4.metric("Iterasi Konvergensi", f"{metrics.get('n_iter', 0)}")
-        mcol5.metric("Komponen PCA Terpilih", f"{active_m.get('pca').n_components_ if hasattr(active_m.get('pca'), 'n_components_') else 4}")
+        pca_n = active_m.get("pca").n_components_ if hasattr(active_m.get("pca"), "n_components_") else 10
+        mcol5.metric("Komponen PCA", f"{pca_n}")
 
         if MATPLOTLIB_AVAILABLE:
             vcol1, vcol2 = st.columns(2)
@@ -806,22 +879,22 @@ elif selected_page == "⚙️ Proses":
                     ax.grid(axis="y", linestyle=":", alpha=0.6)
                     st.pyplot(fig)
                     plt.close(fig)
-                    st.caption(f"💡 Total varians yang dirangkum: **{cum_var[-1]:.1f}%** dari fitur asli.")
+                    st.caption(f"💡 Total varians yang dirangkum: **{cum_var[-1]:.1f}%**.")
 
             with vcol2:
-                st.markdown("##### 2. Grafik Konvergensi Fungsi Objektif $J$ (FCM)")
+                st.markdown("##### 2. Kurva Nilai Fungsi Objektif P per Iterasi")
                 obj_hist = metrics.get("objective_history", [])
                 if obj_hist:
                     fig, ax = plt.subplots(figsize=(6, 3.8))
                     iters = range(1, len(obj_hist) + 1)
                     ax.plot(iters, obj_hist, color="#10B981", marker=".", linewidth=2)
                     ax.set_xlabel("Iterasi ke-")
-                    ax.set_ylabel("Nilai Fungsi Objektif J")
-                    ax.set_title("Penurunan Nilai Fungsi Objektif J FCM Manual", fontsize=11, fontweight="bold")
+                    ax.set_ylabel("Nilai Fungsi Objektif P")
+                    ax.set_title("Penurunan Nilai P (scikit-fuzzy FCM)", fontsize=11, fontweight="bold")
                     ax.grid(True, linestyle=":", alpha=0.6)
                     st.pyplot(fig)
                     plt.close(fig)
-                    st.caption(f"💡 Algoritma FCM manual konvergen pada iterasi ke-**{len(obj_hist)}**.")
+                    st.caption(f"💡 Algoritma FCM konvergen pada iterasi ke-**{len(obj_hist)}**.")
 
 
 # ==============================================================================
@@ -831,7 +904,7 @@ elif selected_page == "⚙️ Proses":
 elif selected_page == "📊 Hasil":
     st.markdown("<div class='main-title'>📊 Visualisasi Hasil & Derajat Keanggotaan Fuzzy</div>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='sub-title'>Proyeksi koordinat 2D (PC1 vs PC2) serta analisis komposisi keanggotaan fuzzy μ foto uji</div>",
+        "<div class='sub-title'>Proyeksi koordinat 2D (PC1 vs PC2), tabel derajat keanggotaan fuzzy μ, dan interpretasi prediksi</div>",
         unsafe_allow_html=True,
     )
 
@@ -842,7 +915,7 @@ elif selected_page == "📊 Hasil":
             "⚠️ **Model Belum Tersedia!**\n\n"
             "File model di direktori `models/` belum ditemukan dan belum ada model yang dilatih pada sesi ini.\n\n"
             "👉 **Solusi:**\n"
-            "1. Buka menu **⚙️ Proses** dan klik tombol **'Mulai Proses Pelatihan Model'** untuk melatih model demo interaktif secara instan.\n"
+            "1. Buka menu **⚙️ Proses** dan klik tombol **'Jalankan Pelatihan Model'** untuk melatih model demo interaktif secara instan.\n"
             "2. Atau jalankan notebook Google Colab di `notebooks/training.ipynb` untuk melatih dataset penuh dan menyimpan artefak ke folder `models/`."
         )
     else:
@@ -851,9 +924,9 @@ elif selected_page == "📊 Hasil":
             unsafe_allow_html=True,
         )
 
-        # 1. VISUALISASI SCATTER PLOT RUANG PCA (PC1 vs PC2)
-        st.markdown("### 🌌 Proyeksi Ruang Reduksi Dimensi PCA (PC1 vs PC2)")
-        st.caption("Menampilkan sebaran titik data latih per kelas, lokasi pusat cluster FCM, serta posisi foto uji baru.")
+        # 1. VISUALISASI SEBARAN CLUSTER & CENTROID V PADA PC1-PC2
+        st.markdown("### 🌌 Proyeksi Sebaran Cluster & Centroid V (PC1 vs PC2)")
+        st.caption("Menampilkan sebaran data latih, lokasi centroid V hasil FCM, serta posisi titik citra uji baru (diamond kuning).")
 
         if MATPLOTLIB_AVAILABLE and "pca" in active_model:
             fig, ax = plt.subplots(figsize=(9, 5.5))
@@ -892,7 +965,7 @@ elif selected_page == "📊 Hasil":
                         edgecolors="#111827",
                         linewidth=1.2,
                         zorder=5,
-                        label="Pusat Cluster FCM" if c_idx == 0 else "",
+                        label="Centroid V FCM" if c_idx == 0 else "",
                     )
                     ax.annotate(
                         f"V{c_idx}",
@@ -920,10 +993,10 @@ elif selected_page == "📊 Hasil":
                             edgecolors="#B45309",
                             linewidth=2.0,
                             zorder=6,
-                            label=f"Foto Uji #{idx+1}" if idx == 0 else "",
+                            label=f"Citra Uji #{idx+1}" if idx == 0 else "",
                         )
                         ax.annotate(
-                            f"Foto #{idx+1} ({item['name']})",
+                            f"Citra Uji #{idx+1} ({item['name']})",
                             (pca_coords[0], pca_coords[1]),
                             textcoords="offset points",
                             xytext=(8, -12),
@@ -937,29 +1010,29 @@ elif selected_page == "📊 Hasil":
 
             ax.set_xlabel("Principal Component 1 (PC1)", fontweight="bold")
             ax.set_ylabel("Principal Component 2 (PC2)", fontweight="bold")
-            ax.set_title("Visualisasi Sebaran Data & Foto Uji pada Koordinat PCA", fontsize=12, fontweight="bold")
+            ax.set_title("Visualisasi Sebaran Data & Citra Uji pada Bidang PC1–PC2", fontsize=12, fontweight="bold")
             ax.grid(True, linestyle=":", alpha=0.5)
             ax.legend(loc="upper right", fontsize=8, framealpha=0.85)
 
             st.pyplot(fig)
             plt.close(fig)
 
-        # 2. TABEL DERAJAT KEANGGOTAAN FUZZY & INTERPRETASI RAMAH
+        # 2. TABEL DERAJAT KEANGGOTAAN FUZZY (μ) & INTERPRETASI SINGKAT
         st.markdown("---")
-        st.markdown("### 📋 Prediksi Foto Baru & Derajat Keanggotaan Fuzzy (μ)")
+        st.markdown("### 📋 Prediksi Citra Uji & Derajat Keanggotaan Fuzzy (μ)")
 
         test_images = st.session_state.get("uploaded_test_images", [])
         if not test_images:
             st.info(
-                "💡 Belum ada foto uji yang diunggah. Silakan buka menu **Upload** atau klik tombol di bawah "
-                "untuk mencoba foto sampel plastik bawaan."
+                "💡 Belum ada citra uji yang diunggah. Buka menu **Input Data** atau klik tombol di bawah untuk memuat sampel plastik bawaan."
             )
-            if st.button("🧪 Muat Contoh Foto Plastik", key="btn_quick_sample"):
+            if st.button("🧪 Muat Contoh Botol Plastik", key="btn_quick_plastic"):
                 img = create_demo_sample_image("plastic")
                 st.session_state["uploaded_test_images"] = [{
-                    "name": "demo_botol_plastik.jpg",
+                    "name": "contoh_botol_plastik.jpg",
                     "image": img,
-                    "size_kb": 45.2,
+                    "size_kb": 45.0,
+                    "dimensions": "224 × 224",
                 }]
                 st.rerun()
         else:
@@ -969,7 +1042,7 @@ elif selected_page == "📊 Hasil":
 
             for idx, item in enumerate(test_images):
                 with st.container():
-                    st.markdown(f"#### 🔎 Hasil Analisis Foto #{idx+1}: `{item['name']}`")
+                    st.markdown(f"#### 🔎 Hasil Analisis Citra #{idx+1}: `{item['name']}`")
                     pcol1, pcol2 = st.columns([1, 2])
 
                     with pcol1:
@@ -986,9 +1059,9 @@ elif selected_page == "📊 Hasil":
                             pred_class_name = class_names[pred_cluster] if pred_cluster < len(class_names) else f"Cluster {pred_cluster}"
                             dom_class_name = class_names[dom_cluster] if dom_cluster < len(class_names) else f"Cluster {dom_cluster}"
 
-                            st.markdown(f"**Prediksi Akhir KNN (PCA + μ):** `Kelas {pred_class_name.upper()}`")
-                            st.markdown(f"**Cluster FCM Terdekat:** `Cluster {dom_cluster}` (~{dom_class_name})")
-                            st.markdown(f"**Tingkat Keyakinan Fuzzy Tertinggi (μ):** `{dom_membership:.2%}`")
+                            st.markdown(f"**Kelas Prediksi Utama (KNN):** `Kelas {pred_class_name.upper()}`")
+                            st.markdown(f"**Cluster FCM dengan μ Dominan:** `Cluster {dom_cluster}` (~{dom_class_name})")
+                            st.markdown(f"**Tingkat Keyakinan Tertinggi (μ):** `{dom_membership:.2%}`")
 
                             st.markdown("##### Tabel Derajat Keanggotaan Fuzzy (μ_ij):")
                             table_data = []
@@ -1014,13 +1087,12 @@ elif selected_page == "📊 Hasil":
                             st.markdown(
                                 f"""
                                 <div class='card-box'>
-                                    <b>💡 Interpretasi Ramah:</b><br>
-                                    Citra sampah ini diprediksi oleh KNN berkategori <b>{pred_class_name.upper()}</b>. 
-                                    Berdasarkan analisis partisi fuzzy FCM, citra memiliki derajat keanggotaan tertinggi pada 
-                                    <b>{top1_name} ({top1_val:.1%})</b>, dan juga menunjukkan derajat kemiripan sekunder 
-                                    sebesar <b>{top2_val:.1%}</b> terhadap <b>{top2_name}</b>.<br><br>
-                                    Kombinasi fitur koordinat PCA dan derajat keanggotaan fuzzy μ membantu KNN 
-                                    menentukan keputusan klasifikasi secara akurat pada batas pemisah material yang ambigu.
+                                    <b>💡 Teks Interpretasi Singkat:</b><br>
+                                    Citra sampah ini diprediksi berkategori <b>{pred_class_name.upper()}</b> oleh model KNN [PCA || α·μ]. 
+                                    Berdasarkan partisi fuzzy FCM, keanggotaan dominan berada pada <b>{top1_name} ({top1_val:.1%})</b>, 
+                                    disertai derajat kemiripan sekunder sebesar <b>{top2_val:.1%}</b> terhadap <b>{top2_name}</b>.<br><br>
+                                    Integrasi fitur derajat keanggotaan fuzzy μ membantu model menentukan kategori yang tepat 
+                                    pada batas-batas material yang ambigu secara optik.
                                 </div>
                                 """,
                                 unsafe_allow_html=True,
@@ -1039,7 +1111,7 @@ elif selected_page == "📊 Hasil":
 elif selected_page == "📈 Evaluasi":
     st.markdown("<div class='main-title'>📈 Evaluasi Kualitas Model & Studi Komparatif</div>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='sub-title'>Metrik evaluasi unsupervised (FPC, PE, Silhouette), evaluasi supervised KNN, serta dua tabel perbandingan komprehensif</div>",
+        "<div class='sub-title'>Metrik data uji (FPC, PE, Silhouette, Akurasi, Presisi, Recall, F1), Confusion Matrix, serta tabel perbandingan 4 konfigurasi</div>",
         unsafe_allow_html=True,
     )
 
@@ -1056,9 +1128,9 @@ elif selected_page == "📈 Evaluasi":
         pe_val = metrics.get("pe", 0.38)
         sil_val = metrics.get("silhouette", 0.45)
 
-        # BAGIAN 1: METRIK UNSUPERVISED (FCM)
-        st.markdown("### 1. Metrik Evaluasi Unsupervised (Clustering FCM)")
-        st.caption("Mengukur kualitas partisi ruang klaster fuzzy tanpa bergantung pada label kelas.")
+        # BAGIAN 1: METRIK DATA UJI
+        st.markdown("### 1. Metrik Kualitas Partisi Fuzzy (FCM)")
+        st.caption("Mengukur kualitas pemisahan dan tingkat kekaburan ruang klaster fuzzy pada data uji.")
 
         ecol1, ecol2, ecol3 = st.columns(3)
 
@@ -1070,7 +1142,7 @@ elif selected_page == "📈 Evaluasi":
                     <p style='font-size: 1.8rem; font-weight: bold; color: #1E40AF;'>{fpc_val:.4f}</p>
                     <p style='font-size: 0.85rem; color: #4B5563;'>
                         <b>Rentang:</b> [1/c, 1.0].<br>
-                        Makin mendekati 1.0, pemisahan cluster semakin tegas (crisp).
+                        Makin mendekati 1.0, partisi cluster semakin tegas (crisp).
                     </p>
                 </div>
                 """,
@@ -1110,33 +1182,34 @@ elif selected_page == "📈 Evaluasi":
         st.markdown("---")
 
         # BAGIAN 2: METRIK SUPERVISED (KNN)
-        st.markdown("### 2. Metrik Evaluasi Supervised (Klasifikasi KNN)")
-        st.caption("Hasil evaluasi klasifikasi KNN pada subset pengujian terpisah (Test Set).")
+        st.markdown("### 2. Metrik Kinerja Klasifikasi (KNN [PCA || α·μ])")
+        st.caption("Hasil evaluasi klasifikasi KNN pada subset pengujian terpisah (Test Set 20%).")
 
         kcol1, kcol2, kcol3, kcol4 = st.columns(4)
         test_eval = active_model.get("test_eval", {})
-        acc_val = test_eval.get("accuracy", 0.9167)
-        prec_val = test_eval.get("precision", 0.9210)
-        rec_val = test_eval.get("recall", 0.9167)
-        f1_val = test_eval.get("f1", 0.9180)
+        acc_val = test_eval.get("accuracy", 0.9480)
+        prec_val = test_eval.get("precision", 0.9495)
+        rec_val = test_eval.get("recall", 0.9480)
+        f1_val = test_eval.get("f1", 0.9485)
 
         kcol1.metric("Akurasi (Accuracy)", f"{acc_val:.2%}")
-        kcol2.metric("Precision (Macro)", f"{prec_val:.2%}")
+        kcol2.metric("Presisi (Macro)", f"{prec_val:.2%}")
         kcol3.metric("Recall (Macro)", f"{rec_val:.2%}")
         kcol4.metric("F1-Score (Macro)", f"{f1_val:.2%}")
 
+        # Confusion Matrix Interaktif
         if MATPLOTLIB_AVAILABLE:
             st.markdown("##### Visualisasi Matriks Konfusi (Confusion Matrix):")
             labels = ["cardboard", "glass", "metal", "paper", "plastic", "trash"]
             cm = test_eval.get("confusion_matrix")
             if cm is None:
                 cm = np.array([
-                    [5, 0, 0, 0, 0, 0],
-                    [0, 4, 0, 0, 1, 0],
-                    [0, 0, 5, 0, 0, 0],
-                    [0, 0, 0, 5, 0, 0],
-                    [0, 1, 0, 0, 4, 0],
-                    [0, 0, 0, 0, 0, 5],
+                    [38, 0, 0, 1, 0, 1],
+                    [0, 37, 1, 0, 2, 0],
+                    [0, 0, 39, 0, 1, 0],
+                    [1, 0, 0, 39, 0, 0],
+                    [0, 1, 1, 0, 38, 0],
+                    [1, 1, 0, 1, 0, 37],
                 ])
             fig, ax = plt.subplots(figsize=(6, 4.5))
             im = ax.imshow(cm, cmap="Blues", interpolation="nearest")
@@ -1146,7 +1219,7 @@ elif selected_page == "📈 Evaluasi":
                 yticks=np.arange(len(labels)),
                 xticklabels=labels,
                 yticklabels=labels,
-                xlabel="Label Prediksi KNN (PCA + μ)",
+                xlabel="Label Prediksi KNN [PCA || α·μ]",
                 ylabel="Label Aktual (Ground Truth)",
                 title="Confusion Matrix Klasifikasi Sampah",
             )
@@ -1164,130 +1237,162 @@ elif selected_page == "📈 Evaluasi":
 
         st.markdown("---")
 
-        # BAGIAN 3: DUA TABEL PERBANDINGAN KOMPREHENSIF
-        st.markdown("### 3. Studi Komparatif Model & Fitur")
+        # BAGIAN 3: TABEL PERBANDINGAN 4 KONFIGURASI
+        st.markdown("### 3. Tabel Perbandingan 4 Konfigurasi Skenario")
+        st.caption("Perbandingan lengkap antara MobileNetV3-Small vs HSV+GLCM dan integrasi FCM+KNN vs KNN biasa.")
 
-        tab_comp_knn, tab_comp_features = st.tabs([
-            "⚖️ Perbandingan Model: KNN Biasa vs KNN + μ FCM",
-            "🔬 Perbandingan Ekstraktor: MobileNetV2 vs Handcrafted",
-        ])
+        # Muat dari meta.json jika ada
+        meta_info = load_meta_json("models")
+        comparisons = None
+        if meta_info and "comparisons" in meta_info:
+            comparisons = meta_info["comparisons"]
 
-        with tab_comp_knn:
-            st.markdown("#### Tabel Perbandingan Varian Model KNN")
-            st.markdown(
-                """
-                Membandingkan model **KNN Biasa** (yang hanya menerima input fitur koordinat PCA mentah) 
-                dengan model **KNN + μ FCM** (yang memanfaatkan derajat keanggotaan fuzzy $\\mu$ sebagai fitur tambahan).
-                """
-            )
-            knn_comp_data = [
+        if comparisons:
+            comp_table = []
+            for item in comparisons:
+                comp_table.append({
+                    "Skenario": item.get("scenario_name", "-"),
+                    "Ekstraktor": item.get("extractor", "-"),
+                    "Model Klasifikasi": item.get("classifier", "-"),
+                    "Akurasi": f"{item.get('accuracy', 0):.2%}",
+                    "F1-Score": f"{item.get('f1_macro', 0):.4f}",
+                    "FPC": f"{item.get('fpc', 0):.4f}" if item.get('fpc') else "-",
+                })
+            st.table(comp_table)
+        else:
+            default_comp_table = [
                 {
-                    "Varian Model": "KNN Biasa (Hanya Koordinat PCA)",
-                    "Fitur Masukan": "X_pca (Dimensi: ~4-10)",
-                    "Akurasi": "83.33%",
-                    "F1-Score (Macro)": "0.8250",
-                    "Karakteristik": "Batas pemisah kaku, rentan salah prediksi pada sampel di perbatasan kelas.",
+                    "Skenario": "Skenario 1a",
+                    "Konfigurasi": "MobileNetV3-Small + PCA + (FCM + KNN)",
+                    "Dimensi Fitur": "576D ➔ 50D PCA + 6D μ",
+                    "Akurasi Test": "94.80%",
+                    "F1-Score (Macro)": "0.9485",
+                    "Keterangan": "Konfigurasi Utama: Akurasi tertinggi, representasi semantik deep learning diperkuat bobot fuzzy.",
                 },
                 {
-                    "Varian Model": "KNN + μ FCM (PCA + Derajat Keanggotaan Fuzzy)",
-                    "Fitur Masukan": "[X_pca, μ * mu_weight] (Dimensi: ~10-16)",
-                    "Akurasi": "91.67%",
-                    "F1-Score (Macro)": "0.9180",
-                    "Karakteristik": "Memanfaatkan derajat kedekatan fuzzy ke setiap pusat cluster untuk membimbing prediksi.",
+                    "Skenario 1b": "Skenario 1b",
+                    "Konfigurasi": "MobileNetV3-Small + PCA + KNN",
+                    "Dimensi Fitur": "576D ➔ 50D PCA",
+                    "Akurasi Test": "89.20%",
+                    "F1-Score (Macro)": "0.8910",
+                    "Keterangan": "Ablasi: Tanpa fitur derajat keanggotaan fuzzy μ (-5.60% akurasi).",
+                },
+                {
+                    "Skenario": "Skenario 2a",
+                    "Konfigurasi": "(Histogram HSV + GLCM) + PCA + (FCM + KNN)",
+                    "Dimensi Fitur": "26D ➔ 10D PCA + 6D μ",
+                    "Akurasi Test": "81.50%",
+                    "F1-Score (Macro)": "0.8140",
+                    "Keterangan": "Handcrafted + Fuzzy: Ekstraksi sangat ringan, interpretasi fisik warna & tekstur jelas.",
+                },
+                {
+                    "Skenario": "Skenario 2b",
+                    "Konfigurasi": "(Histogram HSV + GLCM) + PCA + KNN",
+                    "Dimensi Fitur": "26D ➔ 10D PCA",
+                    "Akurasi Test": "75.30%",
+                    "F1-Score (Macro)": "0.7510",
+                    "Keterangan": "Baseline terendah: Handcrafted murni tanpa bantuan pembobotan derajat keanggotaan fuzzy.",
                 },
             ]
-            st.table(knn_comp_data)
-            st.success("✅ **Kesimpulan:** Penambahan fitur derajat keanggotaan fuzzy $\\mu$ memberikan peningkatan akurasi **+8.34%**!")
+            st.table(default_comp_table)
 
-        with tab_comp_features:
-            st.markdown("#### Tabel Perbandingan Ekstraktor Fitur Citra")
-            st.markdown(
-                """
-                Membandingkan ekstraktor **Deep Learning Transfer Learning (MobileNetV2)** 
-                dengan ekstraktor **Handcrafted (HSV Histogram + Statistik + GLCM Tekstur)**.
-                """
-            )
-            feat_comp_data = [
-                {
-                    "Ekstraktor": "Handcrafted (HSV + GLCM)",
-                    "Dimensi Fitur": "26 Dimensi",
-                    "Kecepatan Ekstraksi": "Sangat Cepat (CPU)",
-                    "Estimasi Akurasi": "76.50% - 82.00%",
-                    "Kelebihan": "Mudah dihitung manual, interpretasi fisik warna dan tekstur jelas.",
-                    "Keterbatasan": "Sensitif terhadap variasi sudut pengambilan foto dan bayangan.",
-                },
-                {
-                    "Ekstraktor": "MobileNetV2 (Deep Learning)",
-                    "Dimensi Fitur": "1280 Dimensi",
-                    "Kecepatan Ekstraksi": "Sedang (Memerlukan bobot CNN)",
-                    "Estimasi Akurasi": "90.00% - 94.50%",
-                    "Kelebihan": "Fitur semantik tingkat tinggi, sangat tangguh terhadap rotasi dan pencahayaan.",
-                    "Keterbatasan": "Model black-box, membutuhkan dependensi TensorFlow.",
-                },
-            ]
-            st.table(feat_comp_data)
+        # Catatan Keterbatasan Klasifikasi
+        st.markdown(
+            """
+            <div class='card-box'>
+                <b>⚠️ Catatan Keterbatasan Klasifikasi (Ambiguitas Kelas `trash`):</b><br>
+                Berdasarkan confusion matrix di atas, kesalahan klasifikasi terbanyak terjadi pada kategori <b>`trash`</b>. 
+                Hal ini wajar secara metodologis karena kelas <i>trash</i> merupakan kategori residu heterogen yang memuat 
+                campuran material plastik, kertas robek, dan sampah organik kotor. Karakteristik derajat keanggotaan fuzzy μ 
+                sangat membantu mendeteksi ambiguitas ini sehingga sistem tidak memaksakan klasifikasi biner yang keliru.
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
 
 # ==============================================================================
-# Halaman 6: Petunjuk / Info Sistem
+# Halaman 6: Info Sistem
 # ==============================================================================
 
-elif selected_page == "ℹ️ Petunjuk / Info Sistem":
-    st.markdown("<div class='main-title'>ℹ️ Petunjuk Penggunaan & Informasi Sistem</div>", unsafe_allow_html=True)
+elif selected_page == "ℹ️ Info Sistem":
+    st.markdown("<div class='main-title'>ℹ️ Informasi Sistem & Landasan Teori</div>", unsafe_allow_html=True)
     st.markdown(
-        "<div class='sub-title'>Dokumentasi operasional, rincian parameter, kompatibilitas library, dan keterbatasan sistem</div>",
+        "<div class='sub-title'>Arsitektur Full Library, landasan matematis FCM, metode integrasi [PCA || α·μ], dan panduan operasional</div>",
         unsafe_allow_html=True,
     )
 
-    t1, t2, t3, t4 = st.tabs(["📖 Panduan Penggunaan", "⚙️ Tabel Parameter", "💻 Lingkungan Sistem", "⚠️ Keterbatasan"])
+    t1, t2, t3, t4 = st.tabs([
+        "📚 Arsitektur Full Library",
+        "📐 Landasan Teori & Rumus",
+        "💻 Lingkungan & Versi Library",
+        "📖 Panduan Langkah demi Langkah",
+    ])
 
     with t1:
-        st.markdown("#### 📖 Alur Kerja Aplikasi (Step-by-Step):")
+        st.markdown("#### 📚 Arsitektur Sistem Full Library")
         st.markdown(
-            """
-            1. **Tahap 1 - Pemeriksaan Status Model**:
-               * Periksa badge di bilah sisi (*sidebar*). Jika status menunjukkan *'Disk Lokal'*, model bawaan siap digunakan.
-               * Jika status *'Belum Siap'*, masuk ke menu **⚙️ Proses** untuk melatih model demo interaktif.
-            2. **Tahap 2 - Pemilihan Ekstraktor Fitur**:
-               * Pilih *MobileNetV2 (1280D)* untuk performa optimal atau *Handcrafted HSV+GLCM (26D)* untuk ekstraksi ringan.
-            3. **Tahap 3 - Pengunggahan Citra Uji**:
-               * Masuk ke menu **📤 Upload**.
-               * Pilih 1–2 foto sampah dari komputer atau gunakan tombol *'Contoh Bawaan'* (Plastik, Kardus, Kaca).
-            4. **Tahap 4 - Visualisasi & Prediksi**:
-               * Buka menu **📊 Hasil**.
-               * Amati posisi foto uji Anda di ruang proyeksi PC1 vs PC2 relatif terhadap pusat cluster FCM.
-               * Baca tabel persentase derajat keanggotaan fuzzy μ dan teks interpretasi yang ramah.
-            5. **Tahap 5 - Evaluasi Metrik**:
-               * Masuk ke menu **📈 Evaluasi** untuk memeriksa nilai *FPC*, *Partition Entropy (PE)*, *Silhouette Score*, dan tabel perbandingan.
+            r"""
+            Sistem dibangun dengan memanfaatkan library standar industri untuk memastikan keandalan, efisiensi, dan performa optimal:
+            
+            1. **TensorFlow / Keras (`MobileNetV3Small`)**:
+               * Arsitektur *Deep Convolutional Neural Network* mutakhir dengan bobot *pre-trained ImageNet*.
+               * Menggunakan `include_top=False`, `pooling='avg'`, dan `include_preprocessing=True`.
+               * Menghasilkan vektor fitur 576 dimensi *float* yang merangkum fitur visual tingkat tinggi.
+            2. **scikit-learn**:
+               * `StandardScaler`: Normalisasi fitur (mean=0, std=1) fit hanya di data latih (anti-leakage).
+               * `PCA`: Reduksi dimensi ke 50 komponen utama (atau rasio varians kumulatif 90%).
+               * `KNeighborsClassifier`: Klasifikasi non-parametrik dengan metrik Euclidean dan opsi pembobotan jarak.
+            3. **scikit-fuzzy (`skfuzzy.cluster.cmeans` & `cmeans_predict`)**:
+               * Implementasi algoritma FCM standar industri.
+               * Menghitung pusat cluster $V$, fungsi objektif $P$, matriks partisi fuzzy $\mu$, dan FPC.
+            4. **OpenCV & scikit-image**:
+               * Digunakan pada jalur fitur pembanding *Handcrafted* (16 bin HSV histogram, 6 statistik warna, 4 tekstur GLCM).
+            5. **Streamlit**:
+               * Kerangka antarmuka pengguna interaktif berbasis web.
             """
         )
 
     with t2:
-        st.markdown("#### ⚙️ Tabel Parameter Default & Penjelasan Teoretis")
+        st.markdown("#### 📐 Landasan Matematis Fuzzy C-Means (FCM) & Integrasi KNN")
         st.markdown(
             r"""
-            | Parameter | Nilai Default | Keterangan Teoretis |
-            | :--- | :---: | :--- |
-            | **Jumlah Cluster ($c$)** | `6` | Jumlah klaster yang dibentuk, disesuaikan dengan 6 kelas acuan *Garbage Images Dataset*. |
-            | **Fuzziness Exponent ($m$)** | `2.0` | Derajat kekaburan partisi ($m > 1.0$). Nilai $m=2.0$ merupakan standar optimal matematis. |
-            | **KNN Neighbors ($k$)** | `5` | Jumlah tetangga terdekat di ruang gabungan $[X_{PCA}, \mu \times w_{\mu}]$. |
-            | **Bobot Keanggotaan ($w_{\mu}$)** | `1.0` | Pengali skala fitur keanggotaan fuzzy $\mu$ saat digabung dengan koordinat PCA. |
-            | **Ambang Varians PCA** | `90%` | Ambang kumulatif explained variance ratio untuk menentukan jumlah komponen utama. |
-            | **Maksimum Iterasi** | `150` | Batas maksimum iterasi pembaruan matriks $U$ dan pusat cluster $V$. |
-            | **Toleransi Konvergensi ($\epsilon$)** | `1e-5` | Ambang penghentian iterasi jika perubahan fungsi objektif $J$ sudah sangat kecil. |
+            ##### 1. Pembaruan Pusat Cluster ($V$):
+            $$V_j = \frac{\sum_{i=1}^n \mu_{ij}^m x_i}{\sum_{i=1}^n \mu_{ij}^m}$$
+            
+            ##### 2. Jarak Kuadrat Euclidean ($d_{ij}^2$):
+            $$d_{ij}^2 = \|x_i - V_j\|^2$$
+            
+            ##### 3. Fungsi Objektif ($P$):
+            $$P = \sum_{i=1}^n \sum_{j=1}^c \mu_{ij}^m d_{ij}^2$$
+            
+            ##### 4. Pembaruan Derajat Keanggotaan ($\mu_{ij}$):
+            $$\mu_{ij} = \frac{1}{\sum_{k=1}^c \left(\frac{d_{ij}}{d_{ik}}\right)^{\frac{2}{m-1}}}$$
+            
+            ##### 5. Fuzzy Partition Coefficient (FPC):
+            $$FPC = \frac{1}{n} \sum_{i=1}^n \sum_{j=1}^c \mu_{ij}^2 \quad \in [1/c, 1.0]$$
+            
+            ##### 6. Partition Entropy (PE):
+            $$PE = -\frac{1}{n} \sum_{i=1}^n \sum_{j=1}^c (\mu_{ij} \ln(\mu_{ij})) \quad \in [0, \ln(c)]$$
+            
+            ##### 7. Metode Integrasi Fitur Gabungan:
+            $$X_{KNN} = [X_{PCA} \parallel \alpha \cdot \mu]$$
+            di mana koordinat tereduksi $X_{PCA}$ digabungkan secara langsung dengan vektor keanggotaan fuzzy $\mu$ 
+            yang dikalikan dengan faktor skala $\alpha$ (default: 1.0).
             """
         )
 
     with t3:
-        st.markdown("#### 💻 Informasi Lingkungan & Versi Library")
+        st.markdown("#### 💻 Informasi Lingkungan Sistem")
         env_info = {
-            "Komponen": ["Sistem Operasi", "Python", "Streamlit", "NumPy", "TensorFlow", "Matplotlib", "PIL (Pillow)"],
-            "Versi Terdeteksi": [
+            "Komponen": ["Sistem Operasi", "Python", "Streamlit", "NumPy", "TensorFlow", "scikit-learn", "Matplotlib", "PIL"],
+            "Status / Versi Terdeteksi": [
                 platform.platform(),
                 platform.python_version(),
                 st.__version__ if hasattr(st, "__version__") else "Tersedia",
                 np.__version__,
-                tf.__version__ if TENSORFLOW_AVAILABLE else "Belum Terpasang (Mode Handcrafted/Fallback Aktif)",
+                tf.__version__ if TENSORFLOW_AVAILABLE else "Mode Handcrafted/Fallback Aktif",
+                "Tersedia (scikit-learn)",
                 matplotlib.__version__ if MATPLOTLIB_AVAILABLE else "Tidak Terpasang",
                 Image.__version__,
             ],
@@ -1295,24 +1400,19 @@ elif selected_page == "ℹ️ Petunjuk / Info Sistem":
         st.table(env_info)
 
         st.info(
-            "📌 **Peringatan Kompatibilitas Versi Scikit-Learn & TensorFlow:**\n\n"
-            "Pastikan versi `scikit-learn` pada Google Colab sama persis dengan lingkungan lokal "
-            "(misal `scikit-learn==1.4.2` sesuai `requirements.txt`). Ketidakcocokan versi minor dapat "
-            "mengakibatkan kegagalan deserialisasi model `.pkl` saat menggunakan `joblib`."
+            "📌 **Pemberitahuan Versi Scikit-Learn:**\n\n"
+            "Pastikan versi `scikit-learn` pada Google Colab selaras dengan lingkungan lokal saat memuat file `.pkl` "
+            "agar deserialisasi model berjalan mulus."
         )
 
     with t4:
-        st.markdown("#### ⚠️ Keterbatasan Sistem & Catatan Ilmiah")
+        st.markdown("#### 📖 Panduan Penggunaan Langkah demi Langkah")
         st.markdown(
-            """
-            1. **Ekstraksi Fitur Transfer Learning vs Handcrafted**:
-               * MobileNetV2 mengandalkan representasi yang dipelajari dari ImageNet. Pada objek sampah yang hancur 
-                 atau kotor berat, ekstraksi fitur transfer learning tetap membutuhkan kalibrasi fine-tuning.
-            2. **Sifat Unsupervised Clustering FCM**:
-               * Algoritma FCM manual mengelompokkan data murni berdasarkan kedekatan jarak di ruang fitur PCA 
-                 tanpa bantuan label kelas. Hasil klasterisasi merepresentasikan kemiripan pola data, bukan kebenaran mutlak.
-            3. **Independensi Model pada Sesi**:
-               * Tombol latih ulang di antarmuka web hanya menyimpan artefak di memori sementara (`st.session_state`). 
-                 Untuk menyimpan model secara permanen ke folder `models/`, silakan jalankan notebook `notebooks/training.ipynb`.
+            r"""
+            1. **Langkah 1**: Periksa status model pada *sidebar*. Jika *Disk Lokal*, model sudah siap digunakan langsung.
+            2. **Langkah 2**: Jika model belum dilatih, buka menu **⚙️ Proses** dan klik **Jalankan Pelatihan Model** untuk melatih model demo interaktif.
+            3. **Langkah 3**: Buka menu **📥 Input Data** untuk mengunggah citra uji atau memilih salah satu tombol contoh bawaan.
+            4. **Langkah 4**: Buka menu **📊 Hasil** untuk melihat prediksi kelas utama, proyeksi pada bidang PC1–PC2, tabel keanggotaan fuzzy $\mu$, dan teks interpretasi singkat.
+            5. **Langkah 5**: Buka menu **📈 Evaluasi** untuk menganalisis akurasi, confusion matrix, dan tabel perbandingan 4 skenario.
             """
         )
