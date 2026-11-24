@@ -1,6 +1,7 @@
 # Final Project TLF: Klasifikasi & Clusterisasi Foto Sampah Terpadu
 > **Mata Kuliah: Teknologi Logika Fuzzy (TLF)**  
-> Arsitektur Terpadu: **MobileNetV2 (1280D) $\rightarrow$ StandardScaler $\rightarrow$ PCA $\rightarrow$ Fuzzy C-Means (NumPy Manual) $\rightarrow$ KNN (+ $\mu$ FCM)** dengan Antarmuka Interaktif **Streamlit**.
+> Implementasi Full Library: **MobileNetV3-Small (576D) $\rightarrow$ StandardScaler $\rightarrow$ PCA $\rightarrow$ scikit-fuzzy FCM $\rightarrow$ KNN (+ $\alpha \cdot \mu$)** dengan Antarmuka Interaktif **Streamlit**.  
+> **Repository GitHub:** [https://github.com/YasMbul/Garbage-Classification-FCM.git](https://github.com/YasMbul/Garbage-Classification-FCM.git)
 
 ---
 
@@ -24,10 +25,6 @@ Dataset yang digunakan adalah **Garbage Images Dataset** dari Kaggle (Lisensi MI
   5. `plastic` (plastik)
   6. `trash` (sampah residu/lainnya)
 
-> **Prinsip Evaluasi & Pembelajaran:**
-> 1. Algoritma **FCM** belajar secara murni **unsupervised** pada ruang fitur PCA tanpa pernah membaca label kelas nama folder.
-> 2. Label kelas asli dari subfolder hanya digunakan untuk melatih classifier **KNN** pemetaan dan menghitung metrik evaluasi klasifikasi (Akurasi, Precision macro, Recall macro, F1-macro, dan Confusion Matrix).
-
 ---
 
 ## 2. Arsitektur & Alur Metode
@@ -41,14 +38,14 @@ Alur pengolahan dirancang secara sistematis dengan pencegahan kebocoran data (*a
 +--------------------+
           |
           v
-+--------------------+     +-----------------------------------------------+
-| Ekstraksi Fitur    | --> | MobileNetV2 (Pretrained ImageNet, 1280 Dim)   |
-|                    |     | *Pembanding: Handcrafted HSV+GLCM (~26 Dim)   |
-+--------------------+     +-----------------------------------------------+
++--------------------+     +-------------------------------------------------+
+| Ekstraksi Fitur    | --> | MobileNetV3-Small (Pretrained ImageNet, 576 Dim)|
+|                    |     | *Pembanding: Handcrafted HSV+GLCM (~26 Dim)     |
++--------------------+     +-------------------------------------------------+
           |
           v
 +--------------------+
-| Stratified Split   | (80% Train, 20% Test)
+| Stratified Split   | (80% Train, 20% Test, seed=42)
 +--------------------+
           |
           +-----------------------+-----------------------+
@@ -60,22 +57,22 @@ Alur pengolahan dirancang secara sistematis dengan pencegahan kebocoran data (*a
           |                                               |
           v                                               v
 +--------------------+                          +--------------------+
-| PCA.fit (Var 90%)  |                          | PCA.transform      |
+| PCA.fit (50 Komp)  |                          | PCA.transform      |
 +--------------------+                          +--------------------+
           |                                               |
           v                                               |
 +--------------------+                                    |
-| FCM Manual (NumPy) | --> Pusat Cluster V                |
+| skfuzzy FCM (cmeans| --> Pusat Cluster V                |
 | Menghasilkan U_tr  |              |                     |
 +--------------------+              v                     v
-          |                   +--------------------------------+
-          |                   | fcm_predict_membership(X_test) |
-          |                   | Menghasilkan U_test            |
-          |                   +--------------------------------+
+          |                   +------------------------------------+
+          |                   | cmeans_predict(X_test_pca.T, V)    |
+          |                   | Menghasilkan U_test                |
+          |                   +------------------------------------+
           v                                               v
 +------------------------------------+          +------------------------------------+
 | Input KNN Train:                   |          | Input KNN Test:                    |
-| [X_train_pca, mu_tr * mu_weight]   |          | [X_test_pca, mu_te * mu_weight]    |
+| [X_train_pca || alpha * mu_tr]     |          | [X_test_pca || alpha * mu_te]      |
 +------------------------------------+          +------------------------------------+
           |                                               |
           v                                               v
@@ -85,24 +82,27 @@ Alur pengolahan dirancang secara sistematis dengan pencegahan kebocoran data (*a
 ```
 
 1. **Ekstraksi Fitur:**
-   - **Utama (MobileNetV2):** Model deep representation CNN pretrained ImageNet (`pooling='avg'`) menghasilkan 1280 fitur bersemantik tinggi.
+   - **Utama (MobileNetV3-Small):** Model CNN ringan `MobileNetV3Small` pretrained ImageNet (`pooling='avg'`, `include_preprocessing=True`) menghasilkan 576 fitur float bersemantik tinggi dari citra $224 \times 224$ pada rentang piksel $[0, 255]$.
    - **Pembanding (Handcrafted):** HSV histogram 16 bin + statistik warna 6 fitur + tekstur GLCM 4 fitur = 26 dimensi.
-2. **Stratified Split & Normalisasi:**
-   - Pemisahan data training (80%) dan testing (20%) dilakukan **sebelum** fitting.
+2. **Sampling & Stratified Split:**
+   - Random sampling 1.000 citra per kelas (total 6.000 citra) dengan `random_state=42`.
+   - Pemisahan data training (80% = 4.800 sampel) dan testing (20% = 1.200 sampel) dilakukan **sebelum** fitting.
+3. **Standarisasi & Reduksi Dimensi PCA:**
    - `StandardScaler` di-fit hanya pada data training.
-3. **Reduksi Dimensi PCA:**
-   - PCA di-fit hanya pada data training dengan target variansi kumulatif 90% (dibatasi maksimum 50 komponen).
-4. **Fuzzy C-Means (NumPy Manual):**
-   - Di-fit pada data training ruang PCA secara murni tanpa library eksternal.
-   - Menghasilkan matriks keanggotaan $U_{train}$, koordinat pusat cluster $V$, kurva fungsi objektif $J$, Fuzzy Partition Coefficient (FPC), dan Partition Entropy (PE).
-   - Derajat keanggotaan data uji dihitung melalui fungsi `fcm_predict_membership()` berdasarkan jarak Euclidean ke pusat cluster $V$.
-5. **KNN Classifier Hybrid (+ $\mu$ FCM):**
-   - Vektor input KNN memadukan koordinat laten PCA dan derajat keanggotaan fuzzy:
-     $$\mathbf{X}_{KNN} = [\mathbf{X}_{PCA}, \boldsymbol{\mu} \times \text{mu\_weight}]$$
+   - `PCA` (50 komponen) di-fit hanya pada data training terstandarisasi.
+4. **Fuzzy C-Means (scikit-fuzzy):**
+   - Menggunakan `skfuzzy.cluster.cmeans` pada data latih di ruang PCA.
+   - Menghasilkan pusat cluster $V$, kurva fungsi objektif $P$, Fuzzy Partition Coefficient (FPC), Partition Entropy (PE), dan Silhouette score.
+   - Derajat keanggotaan data uji dihitung melalui `skfuzzy.cluster.cmeans_predict()`.
+5. **KNN Classifier Hybrid (+ $\alpha \cdot \mu$ FCM):**
+   - Vektor input KNN memadukan koordinat laten PCA dan derajat keanggotaan fuzzy dengan bobot $\alpha$ (default 1.0):
+     $$\mathbf{X}_{KNN} = [\mathbf{X}_{PCA} \parallel \alpha \cdot \boldsymbol{\mu}]$$
    - Prediksi citra baru berlangsung instan (*lazy learner*) tanpa perlu iterasi FCM ulang.
-6. **Dua Komponen Studi Komparasi:**
-   - **Studi 1:** *KNN Biasa* (fitur PCA saja) vs *KNN + $\mu$ FCM* (fitur PCA + derajat keanggotaan fuzzy).
-   - **Studi 2:** *MobileNetV2* (1280 dimensi) vs *Handcrafted HSV+GLCM* (26 dimensi).
+6. **Evaluasi 4 Skenario Pengujian:**
+   - **Skenario 1a:** MobileNetV3-Small + PCA + (FCM + KNN) $\rightarrow$ *Model Usulan*
+   - **Skenario 1b:** MobileNetV3-Small + PCA + KNN
+   - **Skenario 2a:** (Histogram HSV + GLCM) + PCA + (FCM + KNN)
+   - **Skenario 2b:** (Histogram HSV + GLCM) + PCA + KNN
 
 ---
 
@@ -112,16 +112,16 @@ Alur pengolahan dirancang secara sistematis dengan pencegahan kebocoran data (*a
 Garbage-Classification-FCM/
 ├── app.py                      # Aplikasi Web GUI Streamlit (6 menu navigasi)
 ├── config.yaml                 # Konfigurasi parameter model, ekstraktor, & paths
-├── requirements.txt            # Dependensi pustaka (sklearn==1.4.2, tensorflow>=2.15.0)
+├── requirements.txt            # Dependensi pustaka Python
 ├── README.md                   # Dokumentasi lengkap proyek
 ├── .gitignore                  # Pengecualian dataset citra, venv, & cache
 ├── src/                        # Modul algoritma inti
 │   ├── __init__.py             # API publik paket
-│   ├── features.py             # Ekstraksi MobileNetV2 (1280D) & Handcrafted (26D)
-│   ├── fcm.py                  # FCM NumPy manual, FPC, PE, fcm_predict_membership
+│   ├── features.py             # Ekstraksi MobileNetV3-Small (576D) & Handcrafted (26D)
+│   ├── fcm.py                  # Wrapper scikit-fuzzy FCM, FPC, PE, Silhouette
 │   └── pipeline.py             # Pipeline fit, transform, predict, compare, save/load
 ├── notebooks/
-│   └── training.ipynb          # Notebook Google Colab (unduh data, manual FCM, train, export)
+│   └── training.ipynb          # Notebook Google Colab (unduh data, manual FCM, train, 4 skenario)
 ├── data/                       # Direktori dataset citra
 │   ├── README.md               # Panduan struktur dan unduh Garbage Images Dataset
 │   └── download_dataset.py     # Skrip unduh otomatis via Kaggle API
@@ -129,10 +129,10 @@ Garbage-Classification-FCM/
     ├── README.md               # Dokumentasi artefak model
     ├── .gitkeep                # Pelacak git
     ├── scaler.pkl              # Objek StandardScaler
-    ├── pca.pkl                 # Objek PCA
+    ├── pca.pkl                 # Objek PCA (50 komponen)
     ├── fcm_centers.npy         # Koordinat pusat cluster FCM (NumPy array)
     ├── knn.pkl                 # Model KNeighborsClassifier terlatih
-    └── meta.json               # Metadata konfigurasi & versi pustaka
+    └── meta.json               # Metadata konfigurasi, versi library, & hasil skenario
 ```
 
 ---
@@ -141,12 +141,12 @@ Garbage-Classification-FCM/
 
 ### Prasyarat
 - Python 3.10, 3.11, atau 3.12 terpasang.
-- Koneksi internet untuk unduhan awal model pretrained MobileNetV2.
+- Koneksi internet untuk unduhan awal bobot pretrained MobileNetV3-Small.
 
 ### Langkah Instalasi
 1. **Clone repository atau buka direktori proyek:**
    ```bash
-   git clone https://github.com/<username>/Garbage-Classification-FCM.git
+   git clone https://github.com/YasMbul/Garbage-Classification-FCM.git
    cd Garbage-Classification-FCM
    ```
 
@@ -180,12 +180,14 @@ Garbage-Classification-FCM/
 Aplikasi dilengkapi 6 halaman navigasi interaktif berbahasa Indonesia:
 1. **Beranda:** Framing masalah klasifikasi sampah ambigu di TPS/Bank Sampah, sifat keanggotaan kontinu FCM, dan alur metode 4 tahap.
 2. **Upload:** Unggah foto uji (JPG/PNG, maks 10MB) dengan thumbnail preview, opsi tombol sampel cepat, dan opsi unggah dataset ZIP.
-3. **Proses:** Laboratorium latih ulang interaktif pada subset data (10–20 sampel per kelas) dengan kontrol slider ($c, m, k, \text{mu\_weight}, n\_components, \text{test\_size}$). Fitur diekstrak dan di-cache di `st.session_state` sehingga pergantian parameter tidak memerlukan ekstraksi ulang. *(Tidak menimpa folder `models/`)*.
-4. **Hasil:** Scatter plot ruang proyeksi PC1 vs PC2 (sebaran data, pusat cluster FCM, posisi foto baru), tabel derajat keanggotaan fuzzy $\mu_{ij}$ beserta visual bar, dan interpretasi prediksi ramah.
-5. **Evaluasi:** Metrik evaluasi FCM (FPC, PE, Silhouette), metrik KNN (Accuracy, Precision, Recall, F1, Confusion Matrix), serta **dua tabel studi komparasi**:
-   - Komparasi 1: KNN Biasa vs KNN + $\mu$ FCM
-   - Komparasi 2: MobileNetV2 vs Handcrafted (HSV + GLCM)
-6. **Petunjuk / Info Sistem:** Panduan teknis penggunaan, tabel parameter default, versi pustaka lingkungan, dan keterbatasan sistem.
+3. **Proses:** Laboratorium latih ulang interaktif pada subset data dengan kontrol slider ($c, m, k, \alpha, n\_components, \text{test\_size}$). Fitur diekstrak dan di-cache di `st.session_state` sehingga pergantian parameter tidak memerlukan ekstraksi ulang. *(Tidak menimpa folder `models/`)*.
+4. **Hasil:** Scatter plot ruang proyeksi PC1 vs PC2 (sebaran data, pusat cluster FCM, posisi foto baru), tabel derajat keanggotaan fuzzy $\mu_{ij}$ beserta visual bar, kurva konvergensi nilai $P$, dan interpretasi prediksi ramah.
+5. **Evaluasi:** Metrik evaluasi FCM (FPC, PE, Silhouette), metrik KNN (Accuracy, Precision, Recall, F1, Confusion Matrix), serta **tabel perbandingan 4 skenario pengujian**:
+   - Skenario 1a: MobileNetV3-Small + PCA + (FCM + KNN)
+   - Skenario 1b: MobileNetV3-Small + PCA + KNN
+   - Skenario 2a: (Histogram HSV + GLCM) + PCA + (FCM + KNN)
+   - Skenario 2b: (Histogram HSV + GLCM) + PCA + KNN
+6. **Petunjuk / Info Sistem:** Penjelasan full library, rumus-rumus internal FCM ($V, d^2, P, \mu$, FPC, PE, Silhouette), integrasi $[\text{PCA} \parallel \alpha \cdot \mu]$, tabel parameter default, dan panduan penggunaan.
 
 > **Safety Fallback:** Jika folder `models/` belum memiliki file biner hasil training, aplikasi **tidak akan crash**. Aplikasi akan menampilkan pesan informatif ramah yang menyarankan pengguna melakukan latih ulang via menu *Proses* atau menjalankan Colab notebook.
 
@@ -194,50 +196,44 @@ Aplikasi dilengkapi 6 halaman navigasi interaktif berbahasa Indonesia:
 ## 6. Panduan Penggunaan di Google Colab (`notebooks/training.ipynb`)
 
 1. Buka [Google Colab](https://colab.research.google.com).
-2. Unggah file `notebooks/training.ipynb` atau buka langsung dari repository GitHub.
+2. Clone repository:
+   ```bash
+   !git clone https://github.com/YasMbul/Garbage-Classification-FCM.git
+   %cd Garbage-Classification-FCM
+   !pip install -r requirements.txt
+   ```
 3. Jalankan sel secara berurutan:
-   - Verifikasi keselarasan versi `scikit-learn==1.4.2` dan `tensorflow>=2.15.0`.
    - Unduh dataset Garbage Images Dataset via Kaggle API (`zlatan599/garbage-dataset-classification`).
-   - Pelajari **Simulasi Perhitungan Manual FCM & Partition Entropy** (5 data $\times$ 2 komponen PCA).
-   - Ekstrak fitur MobileNetV2 dan latih pipeline terpadu (`fit_pipeline`).
-   - Analisis grafik fungsi objektif $J$, scatter plot PC1 vs PC2, dan confusion matrix data uji.
-   - Jalankan dua sel studi komparasi (KNN vs KNN+$\mu$, dan MobileNetV2 vs Handcrafted).
+   - Pelajari **Simulasi Perhitungan Manual FCM & Entropy** (5 data sampel "Kilap" dan "Coklat").
+   - Ekstrak fitur MobileNetV3-Small dan latih pipeline terpadu (`fit_pipeline`).
+   - Analisis grafik fungsi objektif $P$, scatter plot PC1 vs PC2, dan confusion matrix data uji.
+   - Evaluasi 4 skenario komparasi (1a, 1b, 2a, 2b).
    - Simpan artefak model ke `models/` (`scaler.pkl`, `pca.pkl`, `fcm_centers.npy`, `knn.pkl`, `meta.json`).
 4. Unduh isi folder `models/` dari Colab ke laptop Anda untuk langsung digunakan oleh aplikasi Streamlit lokal.
 
 ---
 
-## 7. Penjelasan Contoh Perhitungan Manual FCM & Entropy
+## 7. Penjelasan Contoh Perhitungan Manual FCM: Kilap & Coklat
 
-Sesuai ketentuan akademik TLF, setiap langkah algoritma harus dapat dibuktikan secara matematis. Pada `notebooks/training.ipynb` disediakan simulasi manual FCM dengan parameter:
-- **Jumlah Data ($N$):** 5 sampel data 2D ($PC_1, PC_2$):
-  - $x_1 = [1.0, 1.5]$
-  - $x_2 = [1.2, 1.8]$
-  - $x_3 = [0.8, 1.2]$
-  - $x_4 = [4.5, 4.0]$
-  - $x_5 = [5.0, 4.5]$
-- **Jumlah Cluster ($c$):** 2 cluster ($v_1, v_2$).
-- **Fuzzifier ($m$):** 2.0.
+Sesuai dokumen konteks tugas TLF, perhitungan manual disimulasikan menggunakan 5 data sampel dengan 2 fitur ("Kilap", "Coklat"):
+- **A** = $(7, 1)$ — Plastik
+- **E** = $(6, 2)$ — Plastik
+- **B** = $(9, 1)$ — Kaca
+- **C** = $(1, 9)$ — Kardus
+- **D** = $(2, 7)$ — Kertas
+
+**Parameter:** $c = 2$, $w = 2$ ($m = 2$), toleransi $\xi = 0.001$, $\text{MaxIter} = 100$, $k = 3$.
 
 ### Rumus Matematis:
-1. **Pusat Cluster ($v_j$):**
-   $$v_j = \frac{\sum_{i=1}^N (u_{ij})^m x_i}{\sum_{i=1}^N (u_{ij})^m}$$
-2. **Jarak Euclidean ($d_{ij}$):**
-   $$d_{ij} = \|x_i - v_j\|_2 = \sqrt{\sum_{k=1}^p (x_{ik} - v_{jk})^2}$$
-3. **Fungsi Objektif ($J$):**
-   $$J = \sum_{i=1}^N \sum_{j=1}^c (u_{ij})^m (d_{ij})^2$$
+1. **Pusat Cluster ($V_j$):**
+   $$V_j = \frac{\sum_{i=1}^N (u_{ij})^w x_i}{\sum_{i=1}^N (u_{ij})^w}, \quad j = 1, 2, \dots, c$$
+2. **Kuadrat Jarak Euclidean ($d_{ij}^2$):**
+   $$d_{ij}^2 = \|x_i - V_j\|^2 = \sum_{k=1}^p (x_{ik} - V_{jk})^2$$
+3. **Fungsi Objektif ($P$):**
+   $$P = \sum_{i=1}^N \sum_{j=1}^c (u_{ij})^w d_{ij}^2$$
 4. **Pembaruan Matriks Keanggotaan ($u_{ij}$):**
-   $$u_{ij} = \frac{1}{\sum_{k=1}^c \left(\frac{d_{ij}}{d_{ik}}\right)^{\frac{2}{m-1}}}$$
-5. **Fuzzy Partition Coefficient (FPC):**
-   $$\text{FPC} = \frac{1}{N} \sum_{i=1}^N \sum_{j=1}^c (u_{ij})^2$$
-6. **Partition Entropy (PE):**
+   $$u_{ij} = \frac{1}{\sum_{k=1}^c \left(\frac{d_{ij}^2}{d_{ik}^2}\right)^{\frac{1}{w-1}}}$$
+5. **Partition Entropy (PE):**
    $$\text{PE} = -\frac{1}{N} \sum_{i=1}^N \sum_{j=1}^c u_{ij} \ln(u_{ij}) \quad (\text{untuk } u_{ij} > 0)$$
-
----
-
-## 8. Catatan Penting Mengenai Versi Pustaka
-
-> **PERINGATAN SERIALISASI MODEL:**
-> Artefak model diserialisasi menggunakan `joblib`.
-> Versi `scikit-learn` pada Google Colab dan di komputer lokal **WAJIB SAMA** (`scikit-learn==1.4.2`).
-> Pastikan juga versi `tensorflow` kompatibel ($\ge 2.15.0$) agar ekstraksi MobileNetV2 menghasilkan bobot fitur yang identik.
+6. **Fuzzy Partition Coefficient (FPC):**
+   $$\text{FPC} = \frac{1}{N} \sum_{i=1}^N \sum_{j=1}^c (u_{ij})^2$$
