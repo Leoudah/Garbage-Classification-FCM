@@ -1024,6 +1024,8 @@ def fit_pipeline(
         "fcm": fcm,
         "knn": knn,
         "fcm_centers": fcm_centers,
+        "cluster_labels_train": fcm_labels_train,
+        "classes": class_names,
         "class_names": class_names,
         "config": config,
         "meta": {
