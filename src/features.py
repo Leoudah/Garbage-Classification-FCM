@@ -1,18 +1,19 @@
 """
 Modul Ekstraksi Fitur Citra Sampah (features.py)
 ================================================
-Mendukung dua mode ekstraksi fitur:
-1. MobileNetV2 (Deep Learning / Transfer Learning) - Default:
-   - Input resolusi 224x224 RGB.
-   - Preprocessing tf.keras.applications.mobilenet_v2.preprocess_input (rentang [-1, 1]).
-   - Global Average Pooling (include_top=False, pooling='avg').
-   - Menghasilkan 1280 fitur representasi visual tingkat tinggi.
-   - Caching model untuk efisiensi komputasi inferensi & training.
-2. Handcrafted Features (Fitur Buatan Tangan) - Pembanding:
+Mendukung dua jalur ekstraksi fitur:
+1. MobileNetV3-Small (Transfer Learning Keras / TensorFlow) - Jalur Utama (Deep Features):
+   - Arsitektur: tf.keras.applications.MobileNetV3Small(weights="imagenet", include_top=False, pooling="avg", include_preprocessing=True)
+   - Input: citra RGB resolusi 224x224 dengan nilai piksel float [0, 255]
+     (Catatan: JANGAN normalisasi atau bagi 255 di luar model karena include_preprocessing=True sudah otomatis
+      menangani rescaling dan normalisasi bawaan MobileNetV3 di dalam graf komputasi model).
+   - Vektor output: 576 dimensi float (representasi fitur visual kompak dan kaya informasi semantik).
+   - Menggunakan mekanisme caching model dalam memori untuk kecepatan inferensi dan efisiensi memori.
+2. Handcrafted Features (Fitur Buatan Tangan) - Jalur Pembanding:
    - 16 fitur Histogram HSV (8 bin H, 4 bin S, 4 bin V, sum=1).
    - 6 fitur Statistik Warna (mean & std kanal H, S, V).
    - 4 fitur Tekstur GLCM (Contrast, Homogeneity, Energy, Correlation).
-   - Opsional 1 fitur Canny Edge Density.
+   - Opsional 1 Canny Edge Density.
    - Total: ~26 dimensi (27 jika use_edge_density=True).
 """
 
@@ -21,12 +22,19 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 from PIL import Image
 
-# Cek ketersediaan TensorFlow untuk MobileNetV2
+# Cek ketersediaan TensorFlow
 try:
     import tensorflow as tf
     TF_AVAILABLE = True
 except ImportError:
     TF_AVAILABLE = False
+
+# Cek ketersediaan ONNX Runtime
+try:
+    import onnxruntime as ort
+    ORT_AVAILABLE = True
+except ImportError:
+    ORT_AVAILABLE = False
 
 # Cek ketersediaan scikit-image untuk GLCM
 try:
@@ -42,25 +50,150 @@ try:
 except ImportError:
     CV2_AVAILABLE = False
 
-# Cache model MobileNetV2 dalam memori agar tidak dimuat berulang-ulang
+# Cache model MobileNetV3-Small dalam memori
 _CACHED_MOBILENET_MODEL = None
+_CACHED_ONNX_SESSION = None
+
+ONNX_PREPROCESS_CONFIG = {
+    "resize": 256,
+    "crop": 224,
+    "mean": (0.485, 0.456, 0.406),
+    "std": (0.229, 0.224, 0.225),
+}
+
+
+def prepare_image_onnx(
+    image: Union[Image.Image, np.ndarray, str, Path],
+    config: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
+    """
+    Pra-pemrosesan citra standar ImageNet untuk ONNX MobileNetV3 (resize 256 -> center crop 224 -> norm).
+    
+    Parameters
+    ----------
+    image : Image.Image, np.ndarray, str, atau Path
+        Input gambar.
+    config : dict, optional
+        Konfigurasi parameter resize, crop, mean, dan std.
+        
+    Returns
+    -------
+    np.ndarray
+        Array berdimensi (3, 224, 224) bertipe float32 dalam format NCHW.
+    """
+    from PIL import ImageOps
+
+    cfg = config or ONNX_PREPROCESS_CONFIG
+    if isinstance(image, (str, Path)):
+        with Image.open(image) as img:
+            img_pil = img.copy()
+    elif isinstance(image, np.ndarray):
+        img_pil = Image.fromarray(image.astype(np.uint8))
+    else:
+        img_pil = image.copy()
+
+    img_pil = ImageOps.exif_transpose(img_pil).convert("RGB")
+    width, height = img_pil.size
+    size, crop = cfg.get("resize", 256), cfg.get("crop", 224)
+    min_dim = min(width, height) if min(width, height) > 0 else 1
+
+    img_resized = img_pil.resize(
+        (size * width // min_dim, size * height // min_dim),
+        Image.Resampling.BILINEAR,
+    )
+    left = round((img_resized.width - crop) / 2)
+    top = round((img_resized.height - crop) / 2)
+    img_cropped = img_resized.crop((left, top, left + crop, top + crop))
+
+    pixels = np.array(img_cropped, dtype=np.float32) / 255.0
+    mean = np.float32(cfg.get("mean", (0.485, 0.456, 0.406)))
+    std = np.float32(cfg.get("std", (0.229, 0.224, 0.225)))
+
+    normalized = ((pixels - mean) / std).transpose(2, 0, 1)
+    return normalized
+
+
+def get_onnx_session(model_path_or_bytes: Union[str, Path, bytes]) -> Any:
+    """Membuat atau mengambil instance ort.InferenceSession dengan intra_op threads optimal."""
+    global _CACHED_ONNX_SESSION
+    if not ORT_AVAILABLE:
+        raise ImportError("onnxruntime tidak terdeteksi. Silakan instal `onnxruntime`.")
+
+    if _CACHED_ONNX_SESSION is not None:
+        return _CACHED_ONNX_SESSION
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 2
+    options.inter_op_num_threads = 1
+
+    if isinstance(model_path_or_bytes, (str, Path)):
+        p = Path(model_path_or_bytes)
+        if not p.is_file():
+            raise FileNotFoundError(f"Model ONNX tidak ditemukan di: {p}")
+        session = ort.InferenceSession(str(p), options, providers=["CPUExecutionProvider"])
+    else:
+        session = ort.InferenceSession(model_path_or_bytes, options, providers=["CPUExecutionProvider"])
+
+    _CACHED_ONNX_SESSION = session
+    return _CACHED_ONNX_SESSION
+
+
+def extract_mobilenet_onnx_features(
+    images_or_paths: Union[List[Any], Any],
+    session: Optional[Any] = None,
+    config: Optional[Dict[str, Any]] = None,
+    model_path: Optional[Union[str, Path]] = None,
+) -> np.ndarray:
+    """
+    Mengekstrak 576 fitur representasi visual menggunakan model ONNX MobileNetV3-Small.
+    Mendukung input tunggal maupun batch (List gambar).
+    """
+    if not ORT_AVAILABLE:
+        raise ImportError("onnxruntime tidak terdeteksi. Silakan instal `onnxruntime`.")
+
+    if session is None:
+        if model_path is None:
+            model_path = Path("data/pretrained/mobilenet_v3_small_Opset17.onnx")
+        session = get_onnx_session(model_path)
+
+    is_single = not isinstance(images_or_paths, (list, tuple))
+    items = [images_or_paths] if is_single else images_or_paths
+
+    cfg = config or ONNX_PREPROCESS_CONFIG
+    batch = np.stack([prepare_image_onnx(img, cfg) for img in items])
+    input_name = session.get_inputs()[0].name
+    feats = session.run(None, {input_name: batch})[0]
+
+    feats = np.asarray(feats, dtype=np.float64)
+    if is_single:
+        return feats[0]
+    return feats
 
 
 def get_mobilenet_model() -> Any:
     """
-    Memuat dan meng-cache model MobileNetV2 pretrained ImageNet (include_top=False, pooling='avg').
+    Memuat dan meng-cache instance model MobileNetV3Small dengan bobot ImageNet.
+    
+    Arsitektur:
+        tf.keras.applications.MobileNetV3Small(
+            weights="imagenet",
+            include_top=False,
+            pooling="avg",
+            include_preprocessing=True,
+            input_shape=(224, 224, 3)
+        )
     
     Returns
     -------
     tf.keras.Model
-        Model ekstraktor fitur MobileNetV2 dengan output 1280 dimensi.
+        Model ekstraktor fitur MobileNetV3-Small dengan output 576 dimensi.
         
     Raises
     ------
     ImportError
-        Jika TensorFlow belum terinstal.
+        Jika TensorFlow belum terpasang di sistem.
     RuntimeError
-        Jika terjadi kendala saat mengunduh bobot ImageNet.
+        Jika gagal mengunduh bobot ImageNet saat inisialisasi awal.
     """
     global _CACHED_MOBILENET_MODEL
     if _CACHED_MOBILENET_MODEL is not None:
@@ -69,24 +202,25 @@ def get_mobilenet_model() -> Any:
     if not TF_AVAILABLE:
         raise ImportError(
             "TensorFlow tidak terdeteksi di environment ini. "
-            "Untuk menggunakan ekstraktor fitur MobileNetV2 (1280 dimensi), "
+            "Untuk menggunakan ekstraktor fitur MobileNetV3-Small (576 dimensi), "
             "silakan instal TensorFlow (`pip install tensorflow`). "
             "Sebagai alternatif, gunakan `feature_extractor='handcrafted'`."
         )
 
     try:
-        model = tf.keras.applications.MobileNetV2(
+        model = tf.keras.applications.MobileNetV3Small(
             weights="imagenet",
             include_top=False,
             pooling="avg",
+            include_preprocessing=True,
             input_shape=(224, 224, 3),
         )
         _CACHED_MOBILENET_MODEL = model
         return _CACHED_MOBILENET_MODEL
     except Exception as e:
         raise RuntimeError(
-            f"Gagal menginisialisasi model MobileNetV2 dengan bobot ImageNet: {e}. "
-            "Pastikan koneksi internet aktif untuk download bobot pertama kali di Colab/lokal, "
+            f"Gagal menginisialisasi model MobileNetV3Small dengan bobot ImageNet: {e}. "
+            "Pastikan koneksi internet aktif untuk download bobot pertama kali, "
             "atau pilih mode feature_extractor='handcrafted'."
         )
 
@@ -96,7 +230,7 @@ def load_image(
     target_size: Optional[Tuple[int, int]] = (224, 224),
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
-    Memuat dan memvalidasi citra input menjadi format RGB dan Grayscale dengan ukuran standar.
+    Memuat dan memvalidasi citra input menjadi format RGB dan Grayscale dengan resolusi standar.
     
     Parameters
     ----------
@@ -108,8 +242,8 @@ def load_image(
     Returns
     -------
     tuple of (rgb_uint8, gray_uint8)
-        rgb_uint8 : np.ndarray berukuran (H, W, 3) dalam rentang [0, 255].
-        gray_uint8 : np.ndarray berukuran (H, W) dalam rentang [0, 255].
+        rgb_uint8 : np.ndarray berukuran (H, W, 3) bernilai [0, 255].
+        gray_uint8 : np.ndarray berukuran (H, W) bernilai [0, 255].
     """
     img_pil: Optional[Image.Image] = None
 
@@ -163,45 +297,53 @@ def load_image(
 
 
 def extract_mobilenet_features(
-    image_or_path: Union[str, Path, Image.Image, np.ndarray],
+    images_or_paths: Union[List[Any], Any],
     model: Optional[Any] = None,
     target_size: Tuple[int, int] = (224, 224),
+    batch_size: int = 32,
 ) -> np.ndarray:
     """
-    Mengekstrak 1280 fitur representasi visual menggunakan arsitektur MobileNetV2 pretrained.
+    Mengekstrak 576 fitur representasi visual menggunakan MobileNetV3-Small Keras/TensorFlow.
+    Mendukung citra tunggal maupun batch (List citra/path).
+    
+    PENTING:
+    - Input citra RGB di-resize ke 224x224 dengan nilai piksel float [0, 255].
+    - JANGAN rescale/bagi 255 di luar model karena include_preprocessing=True sudah bawaan Keras.
     
     Parameters
     ----------
-    image_or_path : str, Path, Image.Image, atau np.ndarray
+    images_or_paths : str, Path, Image.Image, np.ndarray, atau List dari objek tersebut
     model : tf.keras.Model, optional
-        Model MobileNetV2 yang sudah dimuat (jika None, memanggil get_mobilenet_model()).
+        Model MobileNetV3Small yang sudah di-cache (jika None, memanggil get_mobilenet_model()).
     target_size : tuple of int, default (224, 224)
-    
+    batch_size : int, default 32
+        
     Returns
     -------
     np.ndarray
-        Array 1D berukuran (1280,) float64.
+        Array 1D (576,) untuk sampel tunggal, atau 2D (N, 576) untuk batch input.
     """
-    rgb, _ = load_image(image_or_path, target_size=target_size)
-    x = rgb.astype(np.float32)
-
-    # Preprocessing MobileNetV2: skala rentang [-1, 1]
-    if TF_AVAILABLE:
-        try:
-            x_prep = tf.keras.applications.mobilenet_v2.preprocess_input(x)
-        except Exception:
-            x_prep = (x / 127.5) - 1.0
-    else:
-        x_prep = (x / 127.5) - 1.0
-
-    x_batch = np.expand_dims(x_prep, axis=0)
-
     if model is None:
         model = get_mobilenet_model()
 
-    features = model.predict(x_batch, verbose=0)
-    features_1d = np.squeeze(features).astype(np.float64)
-    return features_1d
+    is_single = not isinstance(images_or_paths, (list, tuple))
+    items = [images_or_paths] if is_single else images_or_paths
+
+    batches_out = []
+    for start in range(0, len(items), batch_size):
+        chunk = items[start:start + batch_size]
+        batch_arrays = []
+        for item in chunk:
+            rgb, _ = load_image(item, target_size=target_size)
+            batch_arrays.append(rgb.astype(np.float32))
+        x_batch = np.stack(batch_arrays, axis=0)
+        feats = model.predict(x_batch, verbose=0)
+        batches_out.append(feats)
+
+    features = np.concatenate(batches_out, axis=0).astype(np.float64)
+    if is_single:
+        return np.squeeze(features, axis=0)
+    return features
 
 
 # ==============================================================================
@@ -302,7 +444,7 @@ def extract_handcrafted_features(
     """
     Mengekstrak fitur buatan tangan (~26 dimensi) dari foto sampah:
     - 16 Histogram HSV (8 bin H, 4 bin S, 4 bin V)
-    - 6 Statistik Warna (mean, std pada kanal H, S, V)
+    - 6 Statistik Warna (mean, std kanal H, S, V)
     - 4 Tekstur GLCM (Contrast, Homogeneity, Energy, Correlation)
     - [Opsional] 1 Canny edge density jika use_edge_density=True
     
@@ -318,7 +460,7 @@ def extract_handcrafted_features(
         feat_cfg = config.get("features", {})
         if isinstance(feat_cfg, dict):
             use_edge_density = feat_cfg.get("use_edge_density", False)
-            ts = feat_cfg.get("image_size", feat_cfg.get("target_size", [128, 128]))
+            ts = feat_cfg.get("handcrafted_size", feat_cfg.get("target_size", [128, 128]))
             if isinstance(ts, (list, tuple)) and len(ts) == 2:
                 target_size = (int(ts[0]), int(ts[1]))
 
@@ -371,18 +513,18 @@ def extract_features(
     model: Optional[Any] = None,
 ) -> np.ndarray:
     """
-    Ekstraksi fitur citra sampah dengan dukungan MobileNetV2 atau Handcrafted.
+    Ekstraksi fitur citra sampah dengan dukungan MobileNetV3-Small (576D) atau Handcrafted (~26D).
     
     Parameters
     ----------
     image_or_path : str, Path, Image.Image, atau np.ndarray
     feature_extractor : str, optional
-        Pilihan mode ekstraktor: "mobilenetv2" (1280 dimensi) atau "handcrafted" (~26 dimensi).
-        Jika None, diambil dari config.features.feature_extractor (default "mobilenetv2").
+        Pilihan mode ekstraktor: "mobilenetv3_small" (576 dimensi) atau "handcrafted" (~26 dimensi).
+        Jika None, diambil dari config.features.feature_extractor (default "mobilenetv3_small").
     config : dict, optional
-        Konfigurasi parameter (misal image_size, use_edge_density).
+        Konfigurasi parameter.
     model : tf.keras.Model, optional
-        Model MobileNetV2 pretrained yang sudah dicache (opsional).
+        Instance model MobileNetV3-Small yang telah di-cache.
         
     Returns
     -------
@@ -393,13 +535,13 @@ def extract_features(
         if config and isinstance(config, dict):
             feat_cfg = config.get("features", {})
             if isinstance(feat_cfg, dict):
-                feature_extractor = feat_cfg.get("feature_extractor", "mobilenetv2")
+                feature_extractor = feat_cfg.get("feature_extractor", "mobilenetv3_small")
         else:
-            feature_extractor = "mobilenetv2"
+            feature_extractor = "mobilenetv3_small"
 
     extractor_mode = str(feature_extractor).lower()
 
-    if extractor_mode in ["mobilenetv2", "mobilenet", "deep_learning"]:
+    if extractor_mode in ["mobilenetv3_small", "mobilenetv3", "mobilenet_v3_small", "mobilenet", "deep_learning"]:
         target_size = (224, 224)
         if config and isinstance(config, dict):
             feat_cfg = config.get("features", {})
@@ -411,10 +553,12 @@ def extract_features(
         try:
             return extract_mobilenet_features(image_or_path, model=model, target_size=target_size)
         except Exception as e:
-            # Jika TensorFlow tidak tersedia atau gagal dan fallback diizinkan
             if config and isinstance(config, dict) and config.get("features", {}).get("allow_handcrafted_fallback", False):
                 return extract_handcrafted_features(image_or_path, config=config)
             raise e
+
+    elif extractor_mode in ["mobilenetv3_onnx", "onnx", "mobilenet_onnx"]:
+        return extract_mobilenet_onnx_features(image_or_path, config=config)
 
     elif extractor_mode in ["handcrafted", "hsv_glcm", "manual"]:
         return extract_handcrafted_features(image_or_path, config=config)
@@ -422,19 +566,20 @@ def extract_features(
     else:
         raise ValueError(
             f"Mode ekstraktor '{feature_extractor}' tidak dikenal. "
-            "Pilih 'mobilenetv2' atau 'handcrafted'."
+            "Pilih 'mobilenetv3_small' atau 'handcrafted'."
         )
 
 
 def get_feature_names(
-    feature_extractor: str = "mobilenetv2",
+    feature_extractor: str = "mobilenetv3_small",
     config: Optional[Dict[str, Any]] = None,
 ) -> List[str]:
     """
-    Mengembalikan daftar nama fitur berdasarkan mode ekstraktor.
+    Mengembalikan daftar nama fitur berdasarkan mode ekstraktor yang dipilih.
     """
-    if str(feature_extractor).lower() in ["mobilenetv2", "mobilenet", "deep_learning"]:
-        return [f"mobilenet_feat_{i}" for i in range(1280)]
+    mode = str(feature_extractor).lower()
+    if mode in ["mobilenetv3_small", "mobilenetv3", "mobilenet_v3_small", "mobilenet", "deep_learning"]:
+        return [f"mobilenetv3_feat_{i}" for i in range(576)]
 
     names: List[str] = []
     for i in range(8):

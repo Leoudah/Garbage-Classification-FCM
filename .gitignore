@@ -37,10 +37,13 @@ data/*
 !data/README.md
 !data/.gitkeep
 
-# Artefak Model Biner: Abaikan file model biner yang dihasilkan training
-# Gunakan placeholder README.md dan .gitkeep agar direktori tetap terlacak oleh Git
+# Artefak Model Biner: Izinkan artefak model resmi terlacak oleh Git
 models/*.pkl
 models/*.npy
+!models/scaler.pkl
+!models/pca.pkl
+!models/fcm_centers.npy
+!models/knn.pkl
 !models/README.md
 !models/.gitkeep
 !models/meta.json

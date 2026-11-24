@@ -1,5 +1,6 @@
 """
-Package src: Modul ekstraksi fitur, algoritma FCM manual, dan pipeline PCA-FCM-KNN.
+Package src: Modul ekstraksi fitur MobileNetV3-Small & Handcrafted,
+FCM (scikit-fuzzy), dan pipeline PCA-FCM-KNN.
 Final Project Teknologi Logika Fuzzy (TLF).
 """
 
@@ -9,6 +10,7 @@ from .fcm import (
     compute_fpc,
     compute_partition_entropy,
     compute_pe,
+    compute_fcm_silhouette,
 )
 from .features import (
     extract_features,
@@ -25,8 +27,8 @@ from .pipeline import (
     load_models,
     save_models,
     evaluate_pipeline,
-    compare_knn_variants,
-    compare_feature_extractors,
+    run_four_scenarios,
+    tune_knn_hyperparameters,
     load_dataset_from_directory,
     compute_classification_metrics,
     load_default_config,
@@ -37,6 +39,7 @@ __all__ = [
     "fcm_predict_membership",
     "compute_fpc",
     "compute_partition_entropy",
+    "compute_fcm_silhouette",
     "extract_features",
     "extract_mobilenet_features",
     "extract_handcrafted_features",
@@ -49,8 +52,8 @@ __all__ = [
     "load_models",
     "save_models",
     "evaluate_pipeline",
-    "compare_knn_variants",
-    "compare_feature_extractors",
+    "run_four_scenarios",
+    "tune_knn_hyperparameters",
     "load_dataset_from_directory",
     "compute_classification_metrics",
     "load_default_config",

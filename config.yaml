@@ -1,6 +1,6 @@
 # ==============================================================================
-# Final Project TLF - Garbage Classification (PCA + FCM + KNN)
-# Konfigurasi Parameter Default Pipeline & Model
+# Final Project TLF - Garbage Classification (Full Library Pipeline)
+# MobileNetV3-Small + PCA + Fuzzy C-Means (scikit-fuzzy) + KNN (scikit-learn)
 # Dataset: Kaggle Garbage Images Dataset (zlatan599/garbage-dataset-classification)
 # ==============================================================================
 
@@ -8,34 +8,38 @@
 dataset:
   dataset_slug: "zlatan599/garbage-dataset-classification"
   data_dir: "data/Garbage_Dataset_Classification/images"
-  samples_per_class: 100
-  test_size: 0.2
+  samples_per_class: 1000          # 1000 citra per kelas (total 6000 citra untuk 6 kelas)
+  test_size: 0.2                   # Stratified train/test split 80:20 (4800 train, 1200 test)
   random_state: 42
 
 # Konfigurasi Ekstraksi Fitur
 features:
-  feature_extractor: "mobilenetv2"  # Opsi: "mobilenetv2" (1280 dimensi) | "handcrafted" (~26 dimensi)
-  image_size: [224, 224]           # Dimensi input citra [width, height]
-  use_edge_density: false          # Canny edge density (hanya untuk mode handcrafted)
+  feature_extractor: "mobilenetv3_small"  # Opsi utama: "mobilenetv3_small" (576D) | Pembanding: "handcrafted" (~26D)
+  n_features: 576                         # Dimensi fitur MobileNetV3-Small (Global Average Pooling)
+  image_size: [224, 224]                  # Resolusi input citra RGB
+  use_edge_density: false                 # Canny edge density (hanya untuk mode handcrafted)
 
 # Parameter Principal Component Analysis (PCA)
 pca:
-  variance_threshold: 0.90         # Target kumulatif explained variance ratio (90%)
-  max_components: 50               # Batas maksimum jumlah komponen PCA
+  n_components: 50                        # Jumlah komponen utama (default 50 atau rasio varians, misal 0.95)
+  variance_threshold: 0.95                # Target cumulative explained variance ratio (95%)
 
-# Parameter Fuzzy C-Means (FCM)
+# Parameter Fuzzy C-Means (scikit-fuzzy: cmeans & cmeans_predict)
 fcm:
-  c: 6                             # Jumlah cluster (disesuaikan dengan kelas dataset)
-  m: 2.0                           # Fuzziness exponent (parameter pembobot fuzzy, m > 1)
-  max_iter: 150                    # Batas maksimum iterasi konvergensi
-  epsilon: 0.00001                 # Toleransi ambang konvergensi
-  random_state: 42                 # Seed acak untuk reproduktibilitas inisialisasi U
+  c: 6                                    # Jumlah cluster (sesuai jumlah kelas kategori sampah)
+  m: 2.0                                  # Fuzziness exponent (m > 1)
+  maxiter: 200                            # Batas maksimum iterasi
+  error: 0.00001                          # Toleransi ambang henti konvergensi (xi / epsilon)
+  metric: "euclidean"                     # Metrik jarak
+  random_state: 42                        # Seed reproduktibilitas inisialisasi
 
-# Parameter K-Nearest Neighbors (KNN)
+# Parameter K-Nearest Neighbors (scikit-learn: KNeighborsClassifier)
 knn:
-  n_neighbors: 5                   # Jumlah tetangga terdekat k
-  metric: "euclidean"              # Metrik jarak
-  mu_weight: 1.0                   # Bobot pengali vektor keanggotaan fuzzy mu saat digabung dengan fitur PCA
+  n_neighbors: 5                          # Nilai tetangga terdekat k (default 5, kandidat tuning: 3, 5, 7, 9)
+  weights: "distance"                     # Pembobotan tetangga: "uniform" atau "distance" (Best Result: "distance")
+  metric: "cosine"                        # Metrik jarak: "euclidean" atau "cosine" (Best Result: "cosine")
+  alpha: 1.0                              # Bobot pengali vektor derajat keanggotaan fuzzy mu [PCA || alpha * mu]
+  mu_weight: 1.0                          # Alias untuk parameter alpha
 
 # Path Direktori
 paths:
