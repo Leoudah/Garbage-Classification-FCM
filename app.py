@@ -736,9 +736,15 @@ elif selected_page == "⚙️ Proses":
             )
             param_weights = st.selectbox(
                 "Metode Pembobotan KNN (weights):",
-                options=["uniform", "distance"],
+                options=["distance", "uniform"],
                 index=0,
-                help="'uniform': suara setara. 'distance': bobot berbanding terbalik dengan jarak.",
+                help="'distance': bobot berbanding terbalik dengan jarak (Best Result). 'uniform': suara setara.",
+            )
+            param_metric = st.selectbox(
+                "Metrik Jarak KNN (metric):",
+                options=["cosine", "euclidean"],
+                index=0,
+                help="'cosine': kemiripan arah kosinus vektor fitur (Best Result). 'euclidean': jarak garis lurus Euclidean standar.",
             )
             param_pca_comp = st.slider(
                 "Komponen Utama PCA (n_components):",
@@ -806,7 +812,7 @@ elif selected_page == "⚙️ Proses":
                 },
                 "knn": {
                     "n_neighbors": int(param_k),
-                    "metric": "euclidean",
+                    "metric": param_metric,
                     "weights": param_weights,
                     "alpha": float(param_alpha),
                 },
@@ -816,7 +822,7 @@ elif selected_page == "⚙️ Proses":
             progress_bar.progress(70)
             status_text.text("Tahap 4/5: Menjalankan scikit-fuzzy FCM & menghitung fungsi objektif P...")
 
-            trained_dict = fit_pipeline(X_tr, y_true=y_tr, config=custom_config)
+            trained_dict = fit_pipeline(X_tr, y=y_tr, config=custom_config)
 
             progress_bar.progress(85)
             status_text.text("Tahap 5/5: Menghitung mu_test via cmeans_predict & evaluasi KNN [PCA || α·μ]...")

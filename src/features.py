@@ -29,6 +29,13 @@ try:
 except ImportError:
     TF_AVAILABLE = False
 
+# Cek ketersediaan ONNX Runtime
+try:
+    import onnxruntime as ort
+    ORT_AVAILABLE = True
+except ImportError:
+    ORT_AVAILABLE = False
+
 # Cek ketersediaan scikit-image untuk GLCM
 try:
     from skimage.feature import graycomatrix, graycoprops
@@ -45,6 +52,122 @@ except ImportError:
 
 # Cache model MobileNetV3-Small dalam memori
 _CACHED_MOBILENET_MODEL = None
+_CACHED_ONNX_SESSION = None
+
+ONNX_PREPROCESS_CONFIG = {
+    "resize": 256,
+    "crop": 224,
+    "mean": (0.485, 0.456, 0.406),
+    "std": (0.229, 0.224, 0.225),
+}
+
+
+def prepare_image_onnx(
+    image: Union[Image.Image, np.ndarray, str, Path],
+    config: Optional[Dict[str, Any]] = None,
+) -> np.ndarray:
+    """
+    Pra-pemrosesan citra standar ImageNet untuk ONNX MobileNetV3 (resize 256 -> center crop 224 -> norm).
+    
+    Parameters
+    ----------
+    image : Image.Image, np.ndarray, str, atau Path
+        Input gambar.
+    config : dict, optional
+        Konfigurasi parameter resize, crop, mean, dan std.
+        
+    Returns
+    -------
+    np.ndarray
+        Array berdimensi (3, 224, 224) bertipe float32 dalam format NCHW.
+    """
+    from PIL import ImageOps
+
+    cfg = config or ONNX_PREPROCESS_CONFIG
+    if isinstance(image, (str, Path)):
+        with Image.open(image) as img:
+            img_pil = img.copy()
+    elif isinstance(image, np.ndarray):
+        img_pil = Image.fromarray(image.astype(np.uint8))
+    else:
+        img_pil = image.copy()
+
+    img_pil = ImageOps.exif_transpose(img_pil).convert("RGB")
+    width, height = img_pil.size
+    size, crop = cfg.get("resize", 256), cfg.get("crop", 224)
+    min_dim = min(width, height) if min(width, height) > 0 else 1
+
+    img_resized = img_pil.resize(
+        (size * width // min_dim, size * height // min_dim),
+        Image.Resampling.BILINEAR,
+    )
+    left = round((img_resized.width - crop) / 2)
+    top = round((img_resized.height - crop) / 2)
+    img_cropped = img_resized.crop((left, top, left + crop, top + crop))
+
+    pixels = np.array(img_cropped, dtype=np.float32) / 255.0
+    mean = np.float32(cfg.get("mean", (0.485, 0.456, 0.406)))
+    std = np.float32(cfg.get("std", (0.229, 0.224, 0.225)))
+
+    normalized = ((pixels - mean) / std).transpose(2, 0, 1)
+    return normalized
+
+
+def get_onnx_session(model_path_or_bytes: Union[str, Path, bytes]) -> Any:
+    """Membuat atau mengambil instance ort.InferenceSession dengan intra_op threads optimal."""
+    global _CACHED_ONNX_SESSION
+    if not ORT_AVAILABLE:
+        raise ImportError("onnxruntime tidak terdeteksi. Silakan instal `onnxruntime`.")
+
+    if _CACHED_ONNX_SESSION is not None:
+        return _CACHED_ONNX_SESSION
+
+    options = ort.SessionOptions()
+    options.intra_op_num_threads = 2
+    options.inter_op_num_threads = 1
+
+    if isinstance(model_path_or_bytes, (str, Path)):
+        p = Path(model_path_or_bytes)
+        if not p.is_file():
+            raise FileNotFoundError(f"Model ONNX tidak ditemukan di: {p}")
+        session = ort.InferenceSession(str(p), options, providers=["CPUExecutionProvider"])
+    else:
+        session = ort.InferenceSession(model_path_or_bytes, options, providers=["CPUExecutionProvider"])
+
+    _CACHED_ONNX_SESSION = session
+    return _CACHED_ONNX_SESSION
+
+
+def extract_mobilenet_onnx_features(
+    images_or_paths: Union[List[Any], Any],
+    session: Optional[Any] = None,
+    config: Optional[Dict[str, Any]] = None,
+    model_path: Optional[Union[str, Path]] = None,
+) -> np.ndarray:
+    """
+    Mengekstrak 576 fitur representasi visual menggunakan model ONNX MobileNetV3-Small.
+    Mendukung input tunggal maupun batch (List gambar).
+    """
+    if not ORT_AVAILABLE:
+        raise ImportError("onnxruntime tidak terdeteksi. Silakan instal `onnxruntime`.")
+
+    if session is None:
+        if model_path is None:
+            model_path = Path("data/pretrained/mobilenet_v3_small_Opset17.onnx")
+        session = get_onnx_session(model_path)
+
+    is_single = not isinstance(images_or_paths, (list, tuple))
+    items = [images_or_paths] if is_single else images_or_paths
+
+    cfg = config or ONNX_PREPROCESS_CONFIG
+    batch = np.stack([prepare_image_onnx(img, cfg) for img in items])
+    input_name = session.get_inputs()[0].name
+    feats = session.run(None, {input_name: batch})[0]
+
+    feats = np.asarray(feats, dtype=np.float64)
+    if is_single:
+        return feats[0]
+    return feats
 
 
 def get_mobilenet_model() -> Any:
@@ -174,12 +297,14 @@ def load_image(
 
 
 def extract_mobilenet_features(
-    image_or_path: Union[str, Path, Image.Image, np.ndarray],
+    images_or_paths: Union[List[Any], Any],
     model: Optional[Any] = None,
     target_size: Tuple[int, int] = (224, 224),
+    batch_size: int = 32,
 ) -> np.ndarray:
     """
-    Mengekstrak 576 fitur representasi visual menggunakan MobileNetV3-Small pretrained ImageNet.
+    Mengekstrak 576 fitur representasi visual menggunakan MobileNetV3-Small Keras/TensorFlow.
+    Mendukung citra tunggal maupun batch (List citra/path).
     
     PENTING:
     - Input citra RGB di-resize ke 224x224 dengan nilai piksel float [0, 255].
@@ -187,27 +312,38 @@ def extract_mobilenet_features(
     
     Parameters
     ----------
-    image_or_path : str, Path, Image.Image, atau np.ndarray
+    images_or_paths : str, Path, Image.Image, np.ndarray, atau List dari objek tersebut
     model : tf.keras.Model, optional
         Model MobileNetV3Small yang sudah di-cache (jika None, memanggil get_mobilenet_model()).
     target_size : tuple of int, default (224, 224)
+    batch_size : int, default 32
         
     Returns
     -------
     np.ndarray
-        Array 1D berukuran (576,) float64.
+        Array 1D (576,) untuk sampel tunggal, atau 2D (N, 576) untuk batch input.
     """
-    rgb, _ = load_image(image_or_path, target_size=target_size)
-    # Nilai piksel dalam format float32 rentang [0, 255]
-    x = rgb.astype(np.float32)
-    x_batch = np.expand_dims(x, axis=0)
-
     if model is None:
         model = get_mobilenet_model()
 
-    features = model.predict(x_batch, verbose=0)
-    features_1d = np.squeeze(features).astype(np.float64)
-    return features_1d
+    is_single = not isinstance(images_or_paths, (list, tuple))
+    items = [images_or_paths] if is_single else images_or_paths
+
+    batches_out = []
+    for start in range(0, len(items), batch_size):
+        chunk = items[start:start + batch_size]
+        batch_arrays = []
+        for item in chunk:
+            rgb, _ = load_image(item, target_size=target_size)
+            batch_arrays.append(rgb.astype(np.float32))
+        x_batch = np.stack(batch_arrays, axis=0)
+        feats = model.predict(x_batch, verbose=0)
+        batches_out.append(feats)
+
+    features = np.concatenate(batches_out, axis=0).astype(np.float64)
+    if is_single:
+        return np.squeeze(features, axis=0)
+    return features
 
 
 # ==============================================================================
@@ -420,6 +556,9 @@ def extract_features(
             if config and isinstance(config, dict) and config.get("features", {}).get("allow_handcrafted_fallback", False):
                 return extract_handcrafted_features(image_or_path, config=config)
             raise e
+
+    elif extractor_mode in ["mobilenetv3_onnx", "onnx", "mobilenet_onnx"]:
+        return extract_mobilenet_onnx_features(image_or_path, config=config)
 
     elif extractor_mode in ["handcrafted", "hsv_glcm", "manual"]:
         return extract_handcrafted_features(image_or_path, config=config)
