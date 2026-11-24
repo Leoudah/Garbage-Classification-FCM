@@ -1,21 +1,25 @@
 # Final Project TLF: Klasifikasi & Clusterisasi Foto Sampah Terpadu
+
 > **Mata Kuliah: Teknologi Logika Fuzzy (TLF)**  
 > Implementasi Full Library: **MobileNetV3-Small (576D) $\rightarrow$ StandardScaler $\rightarrow$ PCA $\rightarrow$ scikit-fuzzy FCM $\rightarrow$ KNN (+ $\alpha \cdot \mu$)** dengan Antarmuka Interaktif **Streamlit**.  
-> **Repository GitHub:** [https://github.com/YasMbul/Garbage-Classification-FCM.git](https://github.com/YasMbul/Garbage-Classification-FCM.git)
+> **Repository GitHub:** [https://github.com/Leoudah/Garbage-Classification-FCM.git](https://github.com/Leoudah/Garbage-Classification-FCM.git)
 
 ---
 
 ## 1. Latar Belakang & Framing Masalah
 
-Pada pengelolaan sampah perkotaan di Tempat Pengolahan Sampah (TPS) maupun Bank Sampah, citra foto sampah yang dikumpulkan di lapangan pada umumnya **belum memiliki label (*unlabeled*)**. Selain itu, karakteristik fisik sampah di dunia nyata memiliki batas-batas material yang sangat ambigu:
+Pada pengelolaan sampah perkotaan di Tempat Pengolahan Sampah (TPS) maupun Bank Sampah, citra foto sampah yang dikumpulkan di lapangan pada umumnya **belum memiliki label (_unlabeled_)**. Selain itu, karakteristik fisik sampah di dunia nyata memiliki batas-batas material yang sangat ambigu:
+
 - Kardus yang basah atau kotor memiliki warna kecokelatan dan tekstur serat yang menyerupai kertas biasa.
 - Plastik transparan / botol bening memiliki kemiripan pantulan cahaya dan nilai intensitas dengan pecahan kaca.
 - Kaleng logam bekas yang berkarat memiliki kemiripan warna dan tekstur dengan material kardus.
 
-Pendekatan *crisp clustering* (seperti K-Means biasa) memaksakan setiap data hanya menjadi anggota tunggal (100% atau 0%), yang tidak realistis untuk objek ambigu. **Fuzzy C-Means (FCM)** dipilih karena memungkinkan setiap data memiliki **derajat keanggotaan kontinu ($\mu_{ij} \in [0, 1]$)** ke beberapa cluster sekaligus dengan batasan $\sum_j \mu_{ij} = 1$.
+Pendekatan _crisp clustering_ (seperti K-Means biasa) memaksakan setiap data hanya menjadi anggota tunggal (100% atau 0%), yang tidak realistis untuk objek ambigu. **Fuzzy C-Means (FCM)** dipilih karena memungkinkan setiap data memiliki **derajat keanggotaan kontinu ($\mu\_{ij} \in [0, 1]$)** ke beberapa cluster sekaligus dengan batasan $\sum_j \mu_{ij} = 1$.
 
 ### Dataset Acuan: Garbage Images Dataset
+
 Dataset yang digunakan adalah **Garbage Images Dataset** dari Kaggle (Lisensi MIT):
+
 - **Kaggle Dataset:** [zlatan599/garbage-dataset-classification](https://www.kaggle.com/datasets/zlatan599/garbage-dataset-classification)
 - **Kategori / Kelas:**
   1. `cardboard` (kardus)
@@ -29,7 +33,7 @@ Dataset yang digunakan adalah **Garbage Images Dataset** dari Kaggle (Lisensi MI
 
 ## 2. Arsitektur & Alur Metode
 
-Alur pengolahan dirancang secara sistematis dengan pencegahan kebocoran data (*anti-data leakage*):
+Alur pengolahan dirancang secara sistematis dengan pencegahan kebocoran data (_anti-data leakage_):
 
 ```
 +--------------------+
@@ -97,9 +101,9 @@ Alur pengolahan dirancang secara sistematis dengan pencegahan kebocoran data (*a
 5. **KNN Classifier Hybrid (+ $\alpha \cdot \mu$ FCM):**
    - Vektor input KNN memadukan koordinat laten PCA dan derajat keanggotaan fuzzy dengan bobot $\alpha$ (default 1.0):
      $$\mathbf{X}_{KNN} = [\mathbf{X}_{PCA} \parallel \alpha \cdot \boldsymbol{\mu}]$$
-   - Prediksi citra baru berlangsung instan (*lazy learner*) tanpa perlu iterasi FCM ulang.
+   - Prediksi citra baru berlangsung instan (_lazy learner_) tanpa perlu iterasi FCM ulang.
 6. **Evaluasi 4 Skenario Pengujian:**
-   - **Skenario 1a:** MobileNetV3-Small + PCA + (FCM + KNN) $\rightarrow$ *Model Usulan*
+   - **Skenario 1a:** MobileNetV3-Small + PCA + (FCM + KNN) $\rightarrow$ _Model Usulan_
    - **Skenario 1b:** MobileNetV3-Small + PCA + KNN
    - **Skenario 2a:** (Histogram HSV + GLCM) + PCA + (FCM + KNN)
    - **Skenario 2b:** (Histogram HSV + GLCM) + PCA + KNN
@@ -140,11 +144,14 @@ Garbage-Classification-FCM/
 ## 4. Panduan Instalasi & Menjalankan Lokal
 
 ### Prasyarat
+
 - Python 3.10, 3.11, atau 3.12 terpasang.
 - Koneksi internet untuk unduhan awal bobot pretrained MobileNetV3-Small.
 
 ### Langkah Instalasi
+
 1. **Clone repository atau buka direktori proyek:**
+
    ```bash
    git clone https://github.com/YasMbul/Garbage-Classification-FCM.git
    cd Garbage-Classification-FCM
@@ -163,6 +170,7 @@ Garbage-Classification-FCM/
      ```
 
 3. **Pasang dependensi pustaka:**
+
    ```bash
    pip install -r requirements.txt
    ```
@@ -178,9 +186,10 @@ Garbage-Classification-FCM/
 ## 5. Fitur Antarmuka Streamlit (`app.py`)
 
 Aplikasi dilengkapi 6 halaman navigasi interaktif berbahasa Indonesia:
+
 1. **Beranda:** Framing masalah klasifikasi sampah ambigu di TPS/Bank Sampah, sifat keanggotaan kontinu FCM, dan alur metode 4 tahap.
 2. **Upload:** Unggah foto uji (JPG/PNG, maks 10MB) dengan thumbnail preview, opsi tombol sampel cepat, dan opsi unggah dataset ZIP.
-3. **Proses:** Laboratorium latih ulang interaktif pada subset data dengan kontrol slider ($c, m, k, \alpha, n\_components, \text{test\_size}$). Fitur diekstrak dan di-cache di `st.session_state` sehingga pergantian parameter tidak memerlukan ekstraksi ulang. *(Tidak menimpa folder `models/`)*.
+3. **Proses:** Laboratorium latih ulang interaktif pada subset data dengan kontrol slider ($c, m, k, \alpha, n\_components, \text{test\_size}$). Fitur diekstrak dan di-cache di `st.session_state` sehingga pergantian parameter tidak memerlukan ekstraksi ulang. _(Tidak menimpa folder `models/`)_.
 4. **Hasil:** Scatter plot ruang proyeksi PC1 vs PC2 (sebaran data, pusat cluster FCM, posisi foto baru), tabel derajat keanggotaan fuzzy $\mu_{ij}$ beserta visual bar, kurva konvergensi nilai $P$, dan interpretasi prediksi ramah.
 5. **Evaluasi:** Metrik evaluasi FCM (FPC, PE, Silhouette), metrik KNN (Accuracy, Precision, Recall, F1, Confusion Matrix), serta **tabel perbandingan 4 skenario pengujian**:
    - Skenario 1a: MobileNetV3-Small + PCA + (FCM + KNN)
@@ -189,7 +198,7 @@ Aplikasi dilengkapi 6 halaman navigasi interaktif berbahasa Indonesia:
    - Skenario 2b: (Histogram HSV + GLCM) + PCA + KNN
 6. **Petunjuk / Info Sistem:** Penjelasan full library, rumus-rumus internal FCM ($V, d^2, P, \mu$, FPC, PE, Silhouette), integrasi $[\text{PCA} \parallel \alpha \cdot \mu]$, tabel parameter default, dan panduan penggunaan.
 
-> **Safety Fallback:** Jika folder `models/` belum memiliki file biner hasil training, aplikasi **tidak akan crash**. Aplikasi akan menampilkan pesan informatif ramah yang menyarankan pengguna melakukan latih ulang via menu *Proses* atau menjalankan Colab notebook.
+> **Safety Fallback:** Jika folder `models/` belum memiliki file biner hasil training, aplikasi **tidak akan crash**. Aplikasi akan menampilkan pesan informatif ramah yang menyarankan pengguna melakukan latih ulang via menu _Proses_ atau menjalankan Colab notebook.
 
 ---
 
@@ -216,6 +225,7 @@ Aplikasi dilengkapi 6 halaman navigasi interaktif berbahasa Indonesia:
 ## 7. Penjelasan Contoh Perhitungan Manual FCM: Kilap & Coklat
 
 Sesuai dokumen konteks tugas TLF, perhitungan manual disimulasikan menggunakan 5 data sampel dengan 2 fitur ("Kilap", "Coklat"):
+
 - **A** = $(7, 1)$ — Plastik
 - **E** = $(6, 2)$ — Plastik
 - **B** = $(9, 1)$ — Kaca
@@ -225,13 +235,14 @@ Sesuai dokumen konteks tugas TLF, perhitungan manual disimulasikan menggunakan 5
 **Parameter:** $c = 2$, $w = 2$ ($m = 2$), toleransi $\xi = 0.001$, $\text{MaxIter} = 100$, $k = 3$.
 
 ### Rumus Matematis:
+
 1. **Pusat Cluster ($V_j$):**
    $$V_j = \frac{\sum_{i=1}^N (u_{ij})^w x_i}{\sum_{i=1}^N (u_{ij})^w}, \quad j = 1, 2, \dots, c$$
-2. **Kuadrat Jarak Euclidean ($d_{ij}^2$):**
+2. **Kuadrat Jarak Euclidean ($d\_{ij}^2$):**
    $$d_{ij}^2 = \|x_i - V_j\|^2 = \sum_{k=1}^p (x_{ik} - V_{jk})^2$$
 3. **Fungsi Objektif ($P$):**
    $$P = \sum_{i=1}^N \sum_{j=1}^c (u_{ij})^w d_{ij}^2$$
-4. **Pembaruan Matriks Keanggotaan ($u_{ij}$):**
+4. **Pembaruan Matriks Keanggotaan ($u\_{ij}$):**
    $$u_{ij} = \frac{1}{\sum_{k=1}^c \left(\frac{d_{ij}^2}{d_{ik}^2}\right)^{\frac{1}{w-1}}}$$
 5. **Partition Entropy (PE):**
    $$\text{PE} = -\frac{1}{N} \sum_{i=1}^N \sum_{j=1}^c u_{ij} \ln(u_{ij}) \quad (\text{untuk } u_{ij} > 0)$$
