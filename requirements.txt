@@ -8,6 +8,8 @@
 scikit-learn==1.6.1
 scikit-fuzzy==0.5.0
 tensorflow>=2.15.0
+onnxruntime>=1.20.0
+onnx>=1.17.0
 
 # Framework Aplikasi Web Interaktif
 streamlit>=1.33.0

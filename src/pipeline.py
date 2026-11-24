@@ -182,11 +182,11 @@ class _NumpyPCA:
 
 
 class _NumpyKNN:
-    """Implementasi fallback KNeighborsClassifier berbasis NumPy."""
+    """Implementasi fallback KNeighborsClassifier berbasis NumPy dengan dukungan metric euclidean & cosine."""
     def __init__(self, n_neighbors: int = 5, weights: str = "uniform", metric: str = "euclidean"):
         self.n_neighbors = n_neighbors
         self.weights = weights
-        self.metric = metric
+        self.metric = str(metric).lower()
         self.X_train_: Optional[np.ndarray] = None
         self.y_train_: Optional[np.ndarray] = None
         self.classes_: Optional[np.ndarray] = None
@@ -197,6 +197,20 @@ class _NumpyKNN:
         self.classes_ = np.unique(self.y_train_)
         return self
 
+    def _compute_distances(self, X: np.ndarray) -> np.ndarray:
+        if self.metric == "cosine":
+            norm_X = np.linalg.norm(X, axis=1, keepdims=True)
+            norm_tr = np.linalg.norm(self.X_train_, axis=1, keepdims=True)
+            norm_X = np.where(norm_X < 1e-12, 1.0, norm_X)
+            norm_tr = np.where(norm_tr < 1e-12, 1.0, norm_tr)
+            X_normed = X / norm_X
+            tr_normed = self.X_train_ / norm_tr
+            cosine_sim = np.dot(X_normed, tr_normed.T)
+            return np.clip(1.0 - cosine_sim, 0.0, 2.0)
+        else:
+            diff = X[:, np.newaxis, :] - self.X_train_[np.newaxis, :, :]
+            return np.linalg.norm(diff, axis=2)
+
     def predict(self, X: np.ndarray) -> np.ndarray:
         if self.X_train_ is None or self.y_train_ is None:
             raise RuntimeError("KNN belum di-fit.")
@@ -204,8 +218,7 @@ class _NumpyKNN:
         if X.ndim == 1:
             X = X.reshape(1, -1)
 
-        diff = X[:, np.newaxis, :] - self.X_train_[np.newaxis, :, :]
-        dists = np.linalg.norm(diff, axis=2)
+        dists = self._compute_distances(X)
 
         k = max(1, min(self.n_neighbors, self.X_train_.shape[0]))
         nn_indices = np.argsort(dists, axis=1)[:, :k]
@@ -232,8 +245,7 @@ class _NumpyKNN:
         if X.ndim == 1:
             X = X.reshape(1, -1)
 
-        diff = X[:, np.newaxis, :] - self.X_train_[np.newaxis, :, :]
-        dists = np.linalg.norm(diff, axis=2)
+        dists = self._compute_distances(X)
 
         k = max(1, min(self.n_neighbors, self.X_train_.shape[0]))
         nn_indices = np.argsort(dists, axis=1)[:, :k]
@@ -445,10 +457,14 @@ def load_dataset_from_directory(
     data_dir: Union[str, Path],
     samples_per_class: int = 1000,
     random_state: int = 42,
+    deduplicate_pixels: bool = False,
 ) -> Tuple[List[str], np.ndarray, List[str]]:
     """
     Memuat dataset citra dari subfolder kelas secara dinamis (tanpa hardcode nama kelas).
     Default mengambil hingga 1000 citra per kelas.
+    
+    Jika `deduplicate_pixels=True`, memverifikasi SHA-256 piksel citra agar tidak ada
+    citra identik/duplikat di dalam dataset (sesuai Best Result / anti-leakage tingkat lanjut).
 
     Parameters
     ----------
@@ -457,11 +473,16 @@ def load_dataset_from_directory(
     samples_per_class : int, default=1000
         Batas maksimum sampel yang diambil per kelas.
     random_state : int, default=42
+    deduplicate_pixels : bool, default=False
+        Opsi filter hash piksel citra duplikat.
 
     Returns
     -------
     tuple of (filepaths, labels, class_names)
     """
+    import hashlib
+    from PIL import Image
+
     base_path = Path(data_dir)
     if not base_path.is_dir():
         raise FileNotFoundError(f"Direktori dataset tidak ditemukan: {data_dir}")
@@ -472,6 +493,7 @@ def load_dataset_from_directory(
     filepaths: List[str] = []
     labels: List[str] = []
     class_names: List[str] = []
+    seen_hashes = set()
 
     subdirs = sorted([d for d in base_path.iterdir() if d.is_dir()])
     if not subdirs:
@@ -486,6 +508,21 @@ def load_dataset_from_directory(
 
         if len(img_files) == 0:
             continue
+
+        if deduplicate_pixels:
+            unique_files = []
+            for f in img_files:
+                try:
+                    with Image.open(f) as img:
+                        digest = hashlib.sha256(f"{img.width}x{img.height}:RGB:".encode())
+                        digest.update(img.convert("RGB").tobytes())
+                        h = digest.hexdigest()
+                        if h not in seen_hashes:
+                            seen_hashes.add(h)
+                            unique_files.append(f)
+                except Exception:
+                    unique_files.append(f)
+            img_files = unique_files
 
         if len(img_files) > samples_per_class:
             chosen = rng.choice(img_files, size=samples_per_class, replace=False)
@@ -539,8 +576,8 @@ def load_default_config(config_path: Union[str, Path] = "config.yaml") -> Dict[s
         },
         "knn": {
             "n_neighbors": 5,
-            "weights": "uniform",
-            "metric": "euclidean",
+            "weights": "distance",
+            "metric": "cosine",
             "alpha": 1.0,
             "mu_weight": 1.0,
         },
@@ -561,13 +598,15 @@ def tune_knn_hyperparameters(
     y_train: np.ndarray,
     k_values: List[int] = [3, 5, 7, 9],
     weights_options: List[str] = ["uniform", "distance"],
+    metric_options: List[str] = ["euclidean", "cosine"],
     alpha_values: List[float] = [0.5, 1.0, 1.5, 2.0],
     cv: int = 5,
     random_state: int = 42,
 ) -> Dict[str, Any]:
     """
     Melakukan validasi silang (cross-validation) pada data latih untuk mencari kombinasi
-    parameter k terbaik [3, 5, 7, 9], opsi weights ('uniform' vs 'distance'), dan alpha scaling.
+    parameter k terbaik [3, 5, 7, 9], opsi weights ('uniform' vs 'distance'), metric ('euclidean' vs 'cosine'),
+    dan alpha scaling.
     """
     y_arr = np.asarray(y_train)
     n_samples = len(y_arr)
@@ -604,36 +643,38 @@ def tune_knn_hyperparameters(
 
     for alpha in alpha_values:
         X_train_full = np.hstack([X_train_pca, mu_train * float(alpha)])
-        for w in weights_options:
-            for k in k_values:
-                fold_scores = []
-                for tr_idx, val_idx in folds:
-                    X_tr_fold = X_train_full[tr_idx]
-                    y_tr_fold = y_arr[tr_idx]
-                    X_val_fold = X_train_full[val_idx]
-                    y_val_fold = y_arr[val_idx]
+        for met in metric_options:
+            for w in weights_options:
+                for k in k_values:
+                    fold_scores = []
+                    for tr_idx, val_idx in folds:
+                        X_tr_fold = X_train_full[tr_idx]
+                        y_tr_fold = y_arr[tr_idx]
+                        X_val_fold = X_train_full[val_idx]
+                        y_val_fold = y_arr[val_idx]
 
-                    k_clamped = max(1, min(k, len(X_tr_fold) - 1))
-                    knn_model = _get_knn(n_neighbors=k_clamped, weights=w)
-                    knn_model.fit(X_tr_fold, y_tr_fold)
-                    val_preds = knn_model.predict(X_val_fold)
-                    acc = float(np.mean(val_preds == y_val_fold))
-                    fold_scores.append(acc)
+                        k_clamped = max(1, min(k, len(X_tr_fold) - 1))
+                        knn_model = _get_knn(n_neighbors=k_clamped, weights=w, metric=met)
+                        knn_model.fit(X_tr_fold, y_tr_fold)
+                        val_preds = knn_model.predict(X_val_fold)
+                        acc = float(np.mean(val_preds == y_val_fold))
+                        fold_scores.append(acc)
 
-                mean_acc = float(np.mean(fold_scores))
-                std_acc = float(np.std(fold_scores))
-                record = {
-                    "k": k,
-                    "weights": w,
-                    "alpha": alpha,
-                    "mean_accuracy": mean_acc,
-                    "std_accuracy": std_acc,
-                }
-                cv_results.append(record)
+                    mean_acc = float(np.mean(fold_scores))
+                    std_acc = float(np.std(fold_scores))
+                    record = {
+                        "k": k,
+                        "weights": w,
+                        "metric": met,
+                        "alpha": alpha,
+                        "mean_accuracy": mean_acc,
+                        "std_accuracy": std_acc,
+                    }
+                    cv_results.append(record)
 
-                if mean_acc > best_score:
-                    best_score = mean_acc
-                    best_params = {"k": k, "weights": w, "alpha": alpha, "cv_score": best_score}
+                    if mean_acc > best_score:
+                        best_score = mean_acc
+                        best_params = {"k": k, "weights": w, "metric": met, "alpha": alpha, "cv_score": best_score}
 
     return {
         "best_params": best_params,
@@ -717,8 +758,10 @@ def run_four_scenarios(
         mu_tr_mob = fcm_mob.u_
         mu_te_mob = fcm_predict_membership(X_te_mob_pca, fcm_mob.centers_, m=fcm_m, error=fcm_err, maxiter=fcm_maxiter, seed=seed)
 
+        knn_metric = str(config.get("knn", {}).get("metric", "euclidean"))
+
         # Skenario 1b: MobileNetV3-Small + PCA + KNN
-        knn_1b = _get_knn(n_neighbors=k, weights=weights)
+        knn_1b = _get_knn(n_neighbors=k, weights=weights, metric=knn_metric)
         knn_1b.fit(X_tr_mob_pca, y_train)
         preds_1b = knn_1b.predict(X_te_mob_pca)
         metrics_1b = compute_classification_metrics(y_test, preds_1b, labels=class_names)
@@ -733,7 +776,7 @@ def run_four_scenarios(
         # Skenario 1a: MobileNetV3-Small + PCA + (FCM + KNN)
         X_tr_1a = np.hstack([X_tr_mob_pca, mu_tr_mob * alpha])
         X_te_1a = np.hstack([X_te_mob_pca, mu_te_mob * alpha])
-        knn_1a = _get_knn(n_neighbors=k, weights=weights)
+        knn_1a = _get_knn(n_neighbors=k, weights=weights, metric=knn_metric)
         knn_1a.fit(X_tr_1a, y_train)
         preds_1a = knn_1a.predict(X_te_1a)
         metrics_1a = compute_classification_metrics(y_test, preds_1a, labels=class_names)
@@ -776,8 +819,10 @@ def run_four_scenarios(
         mu_tr_hand = fcm_hand.u_
         mu_te_hand = fcm_predict_membership(X_te_hand_pca, fcm_hand.centers_, m=fcm_m, error=fcm_err, maxiter=fcm_maxiter, seed=seed)
 
+        knn_metric = str(config.get("knn", {}).get("metric", "euclidean"))
+
         # Skenario 2b: Handcrafted + PCA + KNN
-        knn_2b = _get_knn(n_neighbors=k, weights=weights)
+        knn_2b = _get_knn(n_neighbors=k, weights=weights, metric=knn_metric)
         knn_2b.fit(X_tr_hand_pca, y_train)
         preds_2b = knn_2b.predict(X_te_hand_pca)
         metrics_2b = compute_classification_metrics(y_test, preds_2b, labels=class_names)
@@ -792,7 +837,7 @@ def run_four_scenarios(
         # Skenario 2a: Handcrafted + PCA + (FCM + KNN)
         X_tr_2a = np.hstack([X_tr_hand_pca, mu_tr_hand * alpha])
         X_te_2a = np.hstack([X_te_hand_pca, mu_te_hand * alpha])
-        knn_2a = _get_knn(n_neighbors=k, weights=weights)
+        knn_2a = _get_knn(n_neighbors=k, weights=weights, metric=knn_metric)
         knn_2a.fit(X_tr_2a, y_train)
         preds_2a = knn_2a.predict(X_te_2a)
         metrics_2a = compute_classification_metrics(y_test, preds_2a, labels=class_names)

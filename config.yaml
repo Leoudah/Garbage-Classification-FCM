@@ -21,7 +21,7 @@ features:
 
 # Parameter Principal Component Analysis (PCA)
 pca:
-  n_components: 50                        # Jumlah komponen utama (default 50 atau rasio varians)
+  n_components: 50                        # Jumlah komponen utama (default 50 atau rasio varians, misal 0.95)
   variance_threshold: 0.95                # Target cumulative explained variance ratio (95%)
 
 # Parameter Fuzzy C-Means (scikit-fuzzy: cmeans & cmeans_predict)
@@ -36,8 +36,8 @@ fcm:
 # Parameter K-Nearest Neighbors (scikit-learn: KNeighborsClassifier)
 knn:
   n_neighbors: 5                          # Nilai tetangga terdekat k (default 5, kandidat tuning: 3, 5, 7, 9)
-  weights: "uniform"                      # Pembobotan tetangga: "uniform" atau "distance"
-  metric: "euclidean"                     # Metrik jarak Euclidean
+  weights: "distance"                     # Pembobotan tetangga: "uniform" atau "distance" (Best Result: "distance")
+  metric: "cosine"                        # Metrik jarak: "euclidean" atau "cosine" (Best Result: "cosine")
   alpha: 1.0                              # Bobot pengali vektor derajat keanggotaan fuzzy mu [PCA || alpha * mu]
   mu_weight: 1.0                          # Alias untuk parameter alpha
 
