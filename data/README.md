@@ -63,11 +63,9 @@ Skrip akan secara otomatis mengunduh dataset dari Kaggle dan mengekstraknya ke d
 
 ---
 
-## 4. Penggunaan pada Training & Evaluasi
+## 4. Protokol Pengambilan Sampel & Evaluasi
 
-- **Framing Masalah:** Model utama **Fuzzy C-Means (FCM)** bekerja secara **unsupervised** pada fitur PCA tanpa membaca label nama folder saat clustering.
-- Sifat keanggotaan fuzzy $\mu_{ij}$ menangani ambiguitas material sampah (misalnya kemiripan visual kardus kotor dengan kertas, atau plastik transparan dengan kaca).
-- Label kelas asli dari subfolder hanya digunakan untuk:
-  1. Melatih classifier **KNN** pemetaan dengan input gabungan `[fitur_pca, mu * mu_weight]`.
-  2. Menghitung metrik evaluasi eksternal (Akurasi, Precision macro, Recall macro, F1 macro, dan Confusion Matrix).
-- Untuk training ringan dan representatif, dataset dibagi dengan **stratified train/test split (80:20)** dengan subset seimbang ~100 sampel per kelas.
+- **Sampling Representatif:** Random sampling 1.000 citra per kelas (total 6.000 citra untuk 6 kelas) dengan `random_state=42`.
+- **Anti Data Leakage:** Stratified split 80:20 (4.800 data latih, 1.200 data uji) dilakukan di awal sebelum ekstraksi fitur dan fitting model.
+- **Ekstraksi Fitur:** Fitur diekstraksi menggunakan MobileNetV3-Small (576 dimensi) dengan jalur pembanding Handcrafted (HSV + GLCM).
+- **Clusterisasi & Klasifikasi:** FCM (`scikit-fuzzy`) dilatih tanpa label pada ruang PCA data latih. Label subfolder hanya digunakan untuk melatih KNN dan menghitung metrik evaluasi klasifikasi (Akurasi, Presisi, Recall, F1, Confusion Matrix).
